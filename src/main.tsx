@@ -34,6 +34,8 @@ function WebcamPage() {
   const startWebcam = useStore((state) => state.startWebcam);
   const stopWebcam = useStore((state) => state.stopWebcam);
   const updateAsciiOutput = useStore((state) => state.updateAsciiOutput);
+  const perfMetrics = useStore((state) => state.perfMetrics);
+  const showPerfOverlay = useStore((state) => state.showPerfOverlay);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -108,47 +110,78 @@ function WebcamPage() {
 
     if (!ctx || !maskCtx) return;
 
-    const captureFrame = async () => {
+    let lastFrameTime = 0;
+    const targetFrameMs = 33; // ~30fps
+
+    const captureFrame = async (timestamp: number) => {
+      // Skip frame if we're behind schedule
+      if (timestamp - lastFrameTime < targetFrameMs) {
+        animationFrameRef.current = requestAnimationFrame(captureFrame);
+        return;
+      }
+
       if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        const frameStart = performance.now();
+
         // Set canvas size to match video
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         maskCanvas.width = video.videoWidth;
         maskCanvas.height = video.videoHeight;
 
-        // Draw current video frame to canvas
-        ctx.drawImage(video, 0, 0);
+        // Draw mirrored video frame to canvas (matches MediaPipe selfieMode mask)
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -canvas.width, 0);
+        ctx.restore();
 
         // Get image data
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
         // Apply segmentation if segmenter is ready
         let maskData: ImageData | undefined;
+        let segTime = 0;
         if (segmenterRef.current && !segmentationLoading) {
           try {
-            // Send frame to segmentation
+            const segStart = performance.now();
             await segmenterRef.current.send({ image: video });
-
-            // Get the mask (drawn to maskCanvas by MediaPipe)
             maskData = maskCtx.getImageData(
               0,
               0,
               maskCanvas.width,
               maskCanvas.height
             );
+            segTime = performance.now() - segStart;
           } catch (err) {
             console.error("Segmentation error:", err);
           }
         }
 
         // Convert to ASCII with optional mask
+        const asciiStart = performance.now();
         updateAsciiOutput(imageData, maskData);
+        const asciiTime = performance.now() - asciiStart;
+
+        const frameTime = performance.now() - frameStart;
+        lastFrameTime = timestamp;
+
+        // Update perf metrics in store
+        updateAppState({
+          perfMetrics: {
+            fps: Math.round(1000 / Math.max(frameTime, 1)),
+            frameTimeMs: Math.round(frameTime * 10) / 10,
+            segTimeMs: Math.round(segTime * 10) / 10,
+            asciiTimeMs: Math.round(asciiTime * 10) / 10,
+            resolution: `${video.videoWidth}x${video.videoHeight}`,
+            gridSize: `${useStore.getState().asciiWidth}x${Math.floor(video.videoHeight / (Math.floor(video.videoWidth / useStore.getState().asciiWidth) * 2))}`,
+          },
+        });
       }
 
       animationFrameRef.current = requestAnimationFrame(captureFrame);
     };
 
-    captureFrame();
+    animationFrameRef.current = requestAnimationFrame(captureFrame);
 
     return () => {
       if (animationFrameRef.current) {
@@ -197,6 +230,26 @@ function WebcamPage() {
         )}
       </div>
 
+      {/* Performance Metrics Overlay */}
+      {showPerfOverlay && perfMetrics && (
+        <div className="absolute top-4 left-4 z-20 bg-black/70 text-green-300 font-mono text-xs px-3 py-2 rounded space-y-0.5">
+          <div>FPS: {perfMetrics.fps}</div>
+          <div>Frame: {perfMetrics.frameTimeMs}ms</div>
+          <div>Seg: {perfMetrics.segTimeMs}ms</div>
+          <div>ASCII: {perfMetrics.asciiTimeMs}ms</div>
+          <div>Res: {perfMetrics.resolution}</div>
+          <div>Grid: {perfMetrics.gridSize}</div>
+        </div>
+      )}
+
+      {/* Perf Toggle Button */}
+      <button
+        onClick={() => updateAppState({ showPerfOverlay: !showPerfOverlay })}
+        className="absolute top-4 right-4 z-20 bg-gray-800/60 hover:bg-gray-700/80 text-gray-400 text-base font-mono px-2 py-1 rounded transition"
+      >
+        {showPerfOverlay ? "Hide Stats" : "Show Stats"}
+      </button>
+
       {/* Small Webcam Preview - Bottom Right Corner */}
       <div className="absolute bottom-8 right-8 z-10">
         <video
@@ -204,7 +257,7 @@ function WebcamPage() {
           autoPlay
           playsInline
           className="rounded-lg border-2 border-gray-700"
-          style={{ width: "200px", height: "auto" }}
+          style={{ width: "200px", height: "auto", transform: "scaleX(-1)" }}
         />
       </div>
     </div>

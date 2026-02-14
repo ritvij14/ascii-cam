@@ -12,6 +12,20 @@ interface AppState {
   asciiOutput: string;
   asciiWidth: number;
   selectedCharset: string;
+
+  // Temporal smoothing
+  previousMaskData: Uint8ClampedArray | null;
+
+  // Performance metrics
+  perfMetrics: {
+    fps: number;
+    frameTimeMs: number;
+    segTimeMs: number;
+    asciiTimeMs: number;
+    resolution: string;
+    gridSize: string;
+  } | null;
+  showPerfOverlay: boolean;
 }
 interface AppActions {
   // State Update
@@ -32,110 +46,165 @@ export const useStore = create<AppStore>((set, get) => ({
   videoRef: null,
   streamRef: null,
   asciiOutput: '',
-  asciiWidth: 80,
+  asciiWidth: 120,
   selectedCharset: DEFAULT_CHARSET,
+  previousMaskData: null,
+  perfMetrics: null,
+  showPerfOverlay: false,
 
   // Actions
   updateAppState: (partialState) => set(partialState),
 
   updateAsciiOutput: (imageData, maskData) => {
-    const { asciiWidth, selectedCharset } = get();
+    const { asciiWidth, selectedCharset, previousMaskData } = get();
     const charset = CHARACTER_SETS[selectedCharset].characters;
 
     // Apply segmentation mask if provided
     let processedImageData = imageData;
     if (maskData) {
-      // Inline segmentation logic
       const masked = new ImageData(
         new Uint8ClampedArray(imageData.data),
         imageData.width,
         imageData.height
       );
 
-      // Debug: Sample some mask values
-      let sampleCount = 0;
-      let totalMaskValue = 0;
-
-      // Iterate through all pixels
-      for (let i = 0; i < maskData.data.length; i += 4) {
-        // MediaPipe mask uses the RED channel for segmentation mask values
-        const maskValue = maskData.data[i]; // Just use R channel
-
-        // Sample every 10000th pixel for debugging
-        if (i % 10000 === 0) {
-          sampleCount++;
-          totalMaskValue += maskValue;
-          // Also log R, G, B, A separately to understand the mask structure
-          if (sampleCount === 1) {
-            console.log('First pixel RGBA:', maskData.data[i], maskData.data[i+1], maskData.data[i+2], maskData.data[i+3]);
-          }
+      // Temporal smoothing: blend current mask with previous frame's mask
+      const smoothedMask = new Uint8ClampedArray(maskData.data);
+      if (previousMaskData && previousMaskData.length === maskData.data.length) {
+        for (let i = 0; i < maskData.data.length; i += 4) {
+          smoothedMask[i] = 0.7 * maskData.data[i] + 0.3 * previousMaskData[i];
         }
-
-        // Normalize mask value to 0-1
-        const alpha = maskValue / 255;
-
-        // Apply gamma correction for smoother edge transitions
-        const gammaCorrectedAlpha = Math.pow(alpha, 0.8);
-
-        // Alpha blend with black background (0, 0, 0)
-        // This creates smooth anti-aliased edges instead of harsh binary cutoff
-        masked.data[i] = masked.data[i] * gammaCorrectedAlpha;     // R
-        masked.data[i + 1] = masked.data[i + 1] * gammaCorrectedAlpha; // G
-        masked.data[i + 2] = masked.data[i + 2] * gammaCorrectedAlpha; // B
       }
+      set({ previousMaskData: new Uint8ClampedArray(maskData.data) });
 
-      // Debug output
-      const avgMaskValue = totalMaskValue / sampleCount;
-      console.log('Mask debug - Avg value:', avgMaskValue, 'Samples:', sampleCount);
+      for (let i = 0; i < smoothedMask.length; i += 4) {
+        const alpha = smoothedMask[i] / 255;
+        const gammaCorrectedAlpha = Math.pow(alpha, 0.8);
+        masked.data[i] = masked.data[i] * gammaCorrectedAlpha;
+        masked.data[i + 1] = masked.data[i + 1] * gammaCorrectedAlpha;
+        masked.data[i + 2] = masked.data[i + 2] * gammaCorrectedAlpha;
+      }
 
       processedImageData = masked;
     }
 
-    // Inline ASCII conversion logic
+    // ASCII conversion with white balance, color temp correction, LAB brightness, and unsharp masking
     const { data, width: imgWidth, height: imgHeight } = processedImageData;
 
-    // Calculate how many pixels each ASCII character represents
     const cellWidth = Math.floor(imgWidth / asciiWidth);
-    const cellHeight = Math.floor(cellWidth * 2); // ASCII characters are roughly 2x taller than wide
-
+    const cellHeight = Math.floor(cellWidth * 2);
     const height = Math.floor(imgHeight / cellHeight);
 
-    let ascii = '';
+    // White balance: compute mean R, G, B across frame (Gray World algorithm)
+    const totalPixels = imgWidth * imgHeight;
+    let sumR = 0, sumG = 0, sumB = 0;
+    // Sample every 4th pixel for speed
+    for (let i = 0; i < data.length; i += 16) {
+      sumR += data[i];
+      sumG += data[i + 1];
+      sumB += data[i + 2];
+    }
+    const sampleCount = Math.ceil(totalPixels / 4);
+    const meanR = sumR / sampleCount;
+    const meanG = sumG / sampleCount;
+    const meanB = sumB / sampleCount;
+    const grayMean = (meanR + meanG + meanB) / 3;
 
+    // White balance correction factors
+    const wbR = meanR > 0 ? grayMean / meanR : 1;
+    const wbG = meanG > 0 ? grayMean / meanG : 1;
+    const wbB = meanB > 0 ? grayMean / meanB : 1;
+
+    // Color temperature detection & compensation
+    const colorTempRatio = (meanR + meanG) / (meanB + 1);
+    let tempCorrR = 1, tempCorrG = 1, tempCorrB = 1;
+    if (colorTempRatio > 2.5) {
+      // Warm light (tungsten/sunset): reduce red, boost blue
+      tempCorrR = 0.92;
+      tempCorrB = 1.08;
+    } else if (colorTempRatio < 1.5) {
+      // Cool light (fluorescent/overcast): boost red, reduce blue
+      tempCorrR = 1.08;
+      tempCorrB = 0.92;
+    }
+
+    // Helper: linearize sRGB component for LAB conversion
+    const srgbToLinear = (c: number) => {
+      const s = c / 255;
+      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+
+    // Helper: RGB to LAB L* channel (perceptually uniform lightness)
+    const rgbToLabL = (r: number, g: number, b: number): number => {
+      // Apply white balance + color temp correction
+      r = Math.min(255, r * wbR * tempCorrR);
+      g = Math.min(255, g * wbG * tempCorrG);
+      b = Math.min(255, b * wbB * tempCorrB);
+
+      // sRGB to linear
+      const lr = srgbToLinear(r);
+      const lg = srgbToLinear(g);
+      const lb = srgbToLinear(b);
+
+      // Linear RGB to CIE XYZ Y component (relative luminance)
+      const y = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+
+      // Y to L* (CIE LAB lightness)
+      const fy = y > 0.008856 ? Math.cbrt(y) : (903.3 * y + 16) / 116;
+      return y > 0.008856 ? 116 * fy - 16 : 903.3 * y;
+    };
+
+    // First pass: compute per-cell average LAB lightness
+    const cellBrightness = new Float32Array(asciiWidth * height);
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < asciiWidth; x++) {
-        // Calculate the average brightness of this cell
-        let totalBrightness = 0;
+        let totalL = 0;
         let pixelCount = 0;
-
         for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
           for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
             const index = (cy * imgWidth + cx) * 4;
-
-            // Calculate luminance using standard weights
-            const r = data[index];
-            const g = data[index + 1];
-            const b = data[index + 2];
-
-            const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
-            totalBrightness += brightness;
+            totalL += rgbToLabL(data[index], data[index + 1], data[index + 2]);
             pixelCount++;
           }
         }
-
-        const avgBrightness = totalBrightness / pixelCount;
-
-        // Apply gamma correction for perceptually accurate brightness
-        const perceptualBrightness = Math.pow(avgBrightness / 255, 1 / 2.2);
-
-        // Map perceptual brightness to character index
-        const charIndex = Math.floor(perceptualBrightness * (charset.length - 1));
-        ascii += charset[charIndex];
+        cellBrightness[y * asciiWidth + x] = totalL / pixelCount;
       }
-      ascii += '\n';
     }
 
-    set({ asciiOutput: ascii });
+    // Second pass: unsharp masking and character mapping
+    const sharpenK = 0.5;
+    const parts: string[] = [];
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < asciiWidth; x++) {
+        const idx = y * asciiWidth + x;
+        const original = cellBrightness[idx];
+
+        // 3x3 neighborhood average as "blur"
+        let blurSum = 0;
+        let blurCount = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const ny = y + dy, nx = x + dx;
+            if (ny >= 0 && ny < height && nx >= 0 && nx < asciiWidth) {
+              blurSum += cellBrightness[ny * asciiWidth + nx];
+              blurCount++;
+            }
+          }
+        }
+        const blurred = blurSum / blurCount;
+
+        // Sharpened = original + k * (original - blurred), L* range is 0-100
+        const sharpened = Math.max(0, Math.min(100, original + sharpenK * (original - blurred)));
+
+        // L* is already perceptually linear, just normalize to 0-1
+        const charIndex = Math.floor((sharpened / 100) * (charset.length - 1));
+        parts.push(charset[charIndex]);
+      }
+      parts.push('\n');
+    }
+
+    set({ asciiOutput: parts.join('') });
   },
 
   startWebcam: async () => {
