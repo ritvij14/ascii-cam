@@ -4,7 +4,7 @@ import {
   createRootRoute,
   createRouter,
 } from "@tanstack/react-router";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
 import { useStore } from "./store";
@@ -12,7 +12,7 @@ import { useStore } from "./store";
 // Root route
 const rootRoute = createRootRoute({
   component: () => (
-    <div className="min-h-screen bg-gray-950 text-white">
+    <div className="bg-gray-950 text-white min-h-dvh">
       <WebcamPage />
     </div>
   ),
@@ -36,6 +36,31 @@ function WebcamPage() {
   const updateAsciiOutput = useStore((state) => state.updateAsciiOutput);
   const perfMetrics = useStore((state) => state.perfMetrics);
   const showPerfOverlay = useStore((state) => state.showPerfOverlay);
+  const [windowSize, setWindowSize] = useState({
+    w: window.innerWidth,
+    h: window.innerHeight,
+  });
+
+  useEffect(() => {
+    const onResize = () =>
+      setWindowSize({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const asciiFontSize = useMemo(() => {
+    if (!asciiOutput) return 12;
+    const lines = asciiOutput.split("\n");
+    const cols = lines[0]?.length || 1;
+    const rows = lines.length;
+    const padding = 32; // 16px padding on each side
+    const charWidth = (windowSize.w - padding) / cols;
+    const charHeight = (windowSize.h - padding) / rows;
+    return Math.max(
+      4,
+      Math.min(16, Math.floor(Math.min(charWidth / 0.6, charHeight)))
+    );
+  }, [asciiOutput, windowSize]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -60,22 +85,12 @@ function WebcamPage() {
 
         // Set up callback to receive segmentation results
         selfieSegmentation.onResults((results) => {
-          console.log(
-            "Segmentation results received:",
-            results.segmentationMask ? "Has mask" : "No mask"
-          );
           if (maskCanvasRef.current && results.segmentationMask) {
             const maskCtx = maskCanvasRef.current.getContext("2d");
             if (maskCtx) {
               maskCanvasRef.current.width = results.segmentationMask.width;
               maskCanvasRef.current.height = results.segmentationMask.height;
               maskCtx.drawImage(results.segmentationMask, 0, 0);
-              console.log(
-                "Mask drawn to canvas:",
-                maskCanvasRef.current.width,
-                "x",
-                maskCanvasRef.current.height
-              );
             }
           }
         });
@@ -112,6 +127,7 @@ function WebcamPage() {
 
     let lastFrameTime = 0;
     const targetFrameMs = 33; // ~30fps
+    let aspectChecked = false;
 
     const captureFrame = async (timestamp: number) => {
       // Skip frame if we're behind schedule
@@ -121,6 +137,14 @@ function WebcamPage() {
       }
 
       if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        // Detect portrait and reduce asciiWidth once
+        if (!aspectChecked) {
+          aspectChecked = true;
+          if (video.videoHeight > video.videoWidth) {
+            updateAppState({ asciiWidth: 80 });
+          }
+        }
+
         const frameStart = performance.now();
 
         // Set canvas size to match video
@@ -191,12 +215,12 @@ function WebcamPage() {
   }, [isWebcamActive, segmentationLoading, updateAsciiOutput]);
 
   return (
-    <div className="relative flex flex-col min-h-screen bg-black overflow-hidden">
+    <div className="relative flex flex-col bg-black overflow-hidden h-dvh">
       {/* Full-screen ASCII Output */}
-      <div className="absolute inset-0 flex items-center justify-center p-4 w-full h-full">
+      <div className="absolute inset-0 flex items-center justify-center p-4 w-full h-full overflow-hidden">
         <pre
-          className="text-green-400 font-mono whitespace-pre"
-          style={{ fontSize: "12px", lineHeight: "1" }}
+          className="text-green-400 font-mono whitespace-pre leading-none"
+          style={{ fontSize: `${asciiFontSize}px` }}
         >
           {asciiOutput || "ASCII output will appear here..."}
         </pre>
@@ -230,25 +254,25 @@ function WebcamPage() {
         )}
       </div>
 
-      {/* Performance Metrics Overlay */}
-      {showPerfOverlay && perfMetrics && (
-        <div className="absolute top-4 left-4 z-20 bg-black/70 text-green-300 font-mono text-xs px-3 py-2 rounded space-y-0.5">
-          <div>FPS: {perfMetrics.fps}</div>
-          <div>Frame: {perfMetrics.frameTimeMs}ms</div>
-          <div>Seg: {perfMetrics.segTimeMs}ms</div>
-          <div>ASCII: {perfMetrics.asciiTimeMs}ms</div>
-          <div>Res: {perfMetrics.resolution}</div>
-          <div>Grid: {perfMetrics.gridSize}</div>
-        </div>
-      )}
-
-      {/* Perf Toggle Button */}
-      <button
-        onClick={() => updateAppState({ showPerfOverlay: !showPerfOverlay })}
-        className="absolute top-4 right-4 z-20 bg-gray-800/60 hover:bg-gray-700/80 text-gray-400 text-base font-mono px-2 py-1 rounded transition"
-      >
-        {showPerfOverlay ? "Hide Stats" : "Show Stats"}
-      </button>
+      {/* Top Right Controls */}
+      <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-2">
+        <button
+          onClick={() => updateAppState({ showPerfOverlay: !showPerfOverlay })}
+          className="bg-gray-800/60 hover:bg-gray-700/80 text-gray-400 text-xs font-mono px-2 py-1 rounded transition"
+        >
+          {showPerfOverlay ? "Hide Stats" : "Show Stats"}
+        </button>
+        {showPerfOverlay && perfMetrics && (
+          <div className="bg-black/70 text-green-300 font-mono text-xs px-3 py-2 rounded space-y-0.5">
+            <div>FPS: {perfMetrics.fps}</div>
+            <div>Frame: {perfMetrics.frameTimeMs}ms</div>
+            <div>Seg: {perfMetrics.segTimeMs}ms</div>
+            <div>ASCII: {perfMetrics.asciiTimeMs}ms</div>
+            <div>Res: {perfMetrics.resolution}</div>
+            <div>Grid: {perfMetrics.gridSize}</div>
+          </div>
+        )}
+      </div>
 
       {/* Small Webcam Preview - Bottom Right Corner */}
       <div className="absolute bottom-8 right-8 z-10">
@@ -256,8 +280,7 @@ function WebcamPage() {
           ref={videoRef}
           autoPlay
           playsInline
-          className="rounded-lg border-2 border-gray-700"
-          style={{ width: "200px", height: "auto", transform: "scaleX(-1)" }}
+          className="rounded-lg border-2 border-gray-700 max-w-[150px] max-h-[150px] object-contain scale-x-[-1]"
         />
       </div>
     </div>

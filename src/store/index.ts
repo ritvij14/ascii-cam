@@ -218,8 +218,9 @@ export const useStore = create<AppStore>((set, get) => ({
     try {
       set({ webcamError: null });
 
+      const isMobile = window.innerWidth < 768;
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
+        video: { height: { ideal: isMobile ? 480 : 720 } },
         audio: false,
       });
 
