@@ -51,10 +51,12 @@ Follow the recommended Zustand pattern of using **one centralized store** for al
 4. **Component State Rule**:
    - Local UI state (hover, modal open/close) → `useState`
    - Shared state (settings, webcam status, ASCII output) → Zustand store
+   - Imperative resources (rAF handles, library instances, DOM element refs shared with store) → Zustand store properties, managed by store actions with explicit cleanup in corresponding stop/destroy actions
 5. **Selector Slicing**: Components subscribe only to the state they need
    ```typescript
    const resolution = useStore((state) => state.resolution); // Only re-renders when resolution changes
    ```
+6. **Side Effect Ownership**: All imperative logic (DOM manipulation, rAF loops, external library init, event subscriptions) belongs in store actions, not in component `useEffect` hooks. Components trigger actions via event handlers (onClick, ref callbacks), the store owns the lifecycle.
 
 **CRITICAL: Store as Single Source of Truth**
 
@@ -120,33 +122,43 @@ As the store grows, use the [Zustand Slices Pattern](https://zustand.docs.pmnd.r
 
 This keeps individual slice files manageable while preserving the single source of truth in the UI.
 
-## Features to Implement
+### useEffect Policy
 
-### Core Features (Phase 1)
+Before writing a `useEffect`, check which category it falls into:
 
-1. **Live Webcam to ASCII Conversion**
-   - Real-time video stream processing
-   - MediaStream API integration
-   - Frame capture and conversion
+1. **Derived state** (computing value from other state/props) — Use `useMemo`, a plain `const`, or CSS. Never an effect.
+2. **Syncing React to external system** (pushing a ref/state to store) — Use ref callbacks or event handlers. Never an effect.
+3. **"Do X when Y changes"** (watching state to trigger actions) — Trigger from the event that *caused* the change, not from observing the change. Move to store action.
+4. **Subscribing to external event sources** (resize, WebSocket, beforeunload) — Legitimate, but prefer `useSyncExternalStore` or a custom hook. If a `useEffect` is truly needed, it must only exist at the React/browser boundary.
 
-2. **Image Upload to ASCII Conversion**
-   - File input with drag-and-drop
-   - Support for jpg, png, gif formats
-   - Preview before conversion
+**Self-review checklist for any `useEffect`:**
+- Can this be a ref callback instead?
+- Can this be triggered by the user action that caused the state change?
+- Am I watching state just to call another action? (anti-pattern)
+- Does this have proper cleanup for every resource it acquires?
 
-3. **Customization Controls**
-   - Character set selection (dots, standard, emoji, custom)
-   - Resolution adjustment (ASCII width)
-   - Contrast/brightness controls
-   - Font size adjustment
+**Code review rule:** If Claude encounters a `useEffect` while reading or reviewing code, flag it to the user — either inline in the response or via the AskUserQuestion tool — with which category (1-4) it falls into and whether it should be refactored.
 
-4. **Export/Download Capabilities**
-   - Copy to clipboard
-   - Download as .txt file
-   - Download as .html file
-   - Download as PNG image
+## Features
 
-### Technical Implementation
+### Core (Completed)
+
+1. **Live Webcam to ASCII** — Real-time stream processing with MediaPipe segmentation, background removal, LAB color space, temporal smoothing, white balance
+2. **Character Sets** — DOTS, MINIMAL, STANDARD, BLOCKS (defined in `src/constants/character-sets.ts`)
+3. **Performance** — Frame rate management (30fps target), string builder optimization, performance metrics overlay
+
+### Phase 3: New Features (In Progress)
+
+See [Current Implementation Status > Phase 3](#-phase-3-new-features--modes) for detailed task breakdown with implementation notes.
+
+1. **[P3-F1] Default Mode Color Customization** — Preset swatches + color wheel for monochrome ASCII color
+2. **[P3-F2] Image Conversion Tab** — Upload/capture image, convert with any mode, new route
+3. **[P3-F3] Screenshot Feature** — High-res off-screen canvas export as PNG
+4. **[P3-F4] Advanced Color Mode** — Per-character coloring, no segmentation, color family presets
+5. **[P3-F5] Emoji Mode** — Color square emojis or full emoji set, higher density grid
+6. **[P3-F6] Cross-Browser Testing** — Verify all modes across Chrome, Firefox, Safari (desktop & mobile)
+
+### Technical Details
 
 #### Character Sets
 
@@ -154,16 +166,18 @@ This keeps individual slice files manageable while preserving the single source 
 - **MINIMAL**: ` .:-=+*#%@`
 - **STANDARD**: Full ASCII gradient from light to dark
 - **BLOCKS**: Unicode block characters
-- **EMOJI**: Various emoji sets (user selectable)
-- Custom: User-provided character string
+- **EMOJI_COLOR_SQUARES**: 🟥🟧🟨🟩🟦🟪🟫⬛⬜ (planned)
+- **EMOJI_FULL_SET**: Curated brightness/hue-mapped emojis (planned)
 
 #### ASCII Conversion Algorithm
 
 1. Sample pixels from image/video frame
-2. Calculate luminance (brightness) for each sample
-3. Map brightness to character from selected set
-4. Apply contrast/brightness adjustments
-5. Return formatted string with line breaks
+2. Apply white balance + color temperature correction
+3. Convert sRGB → LAB L* (perceptually uniform brightness)
+4. Unsharp mask for edge recovery
+5. Map brightness to character from selected set
+6. (Color mode) Map pixel hue to color family hex
+7. Return formatted output (string for monochrome, colored data for other modes)
 
 #### Performance Targets
 
@@ -278,28 +292,92 @@ pnpm run preview
   - Toggleable overlay showing FPS and frame time, hidden by default, toggle button in top-right corner in `src/main.tsx`
   - **Result:** Real-time visibility into processing performance
 
-#### 📦 Later Features (Post-Quality Improvements)
+#### 🚀 Phase 3: New Features & Modes
 
-- ⏳ Image upload to ASCII conversion
-- ⏳ Customization control panel (character set selection, resolution adjustment)
-- ⏳ Export functionality (copy to clipboard, download as .txt/.html/.png)
+**Goal:** Add multiple rendering modes, color support, screenshot/export, and image conversion. Implementation order chosen to minimize rework (simpler changes first, shared infrastructure built early for later features).
+
+- ⏳ **[P3-F1] Default Mode Color Customization**
+  - Current: ASCII output is hardcoded green (`#00ff00`) via inline style on `<pre>`
+  - Add `asciiColor: string` to store (default `#00ff00`)
+  - **Preset colors:** Row of circular swatches (green, amber, cyan, white, red, purple, blue) — single click to apply
+  - **Color wheel (advanced):** Expandable HSL color picker using `react-colorful` (~2KB) or custom HSL slider
+  - Bind `<pre>` style `color` to `asciiColor` from store
+  - UI: Small collapsible panel (left side or bottom toolbar)
+  - **Complexity:** Low — purely UI work, zero conversion pipeline changes
+
+- ⏳ **[P3-F2] Image Conversion Tab**
+  - Add second route via TanStack Router: `/` for webcam, `/image` for upload
+  - Tab-style navigation at top of page
+  - **Upload UI:** Drag-and-drop zone + file input, support jpg/png/gif
+  - **Camera capture option:** Single-frame capture from webcam
+  - **Conversion:** Reuse existing `updateAsciiOutput(imageData, maskData?)` — call once with image's pixel data instead of per-frame
+  - **Mode selection:** Same mode picker (default/color/emoji) applies to uploaded images
+  - **Segmentation:** Optional for images (MediaPipe works on static images too)
+  - Store additions: `activeTab: 'webcam' | 'image'`, `uploadedImage: string | null`, `processImage()` action
+  - **Complexity:** Low-Medium — mostly UI/routing, conversion logic fully reusable
+
+- ⏳ **[P3-F3] Screenshot Feature**
+  - **Approach:** Off-screen canvas rendering at high resolution (2x-4x, e.g., 3840x2160)
+  - Render ASCII art character-by-character to hidden `<canvas>` with correct colors/fonts
+  - Export via `canvas.toBlob('image/png')` → trigger download with `<a download>` blob URL
+  - **Mobile:** Use Web Share API (`navigator.share()`) as fallback for direct save/share
+  - Store addition: `takeScreenshot()` action that creates off-screen canvas, draws characters, triggers download
+  - Must handle all modes (monochrome, colored, emoji) from the start
+  - **Complexity:** Medium — off-screen canvas layout math for colored/emoji modes
+
+- ⏳ **[P3-F4] Advanced Color Mode (Per-Character Coloring)**
+  - **New rendering mode** — no segmentation, processes raw webcam frame
+  - Pipeline change: pixels → brightness + hue → ASCII character + per-character color hex
+  - **Output format refactor:** Current `asciiOutput: string` becomes either:
+    - (a) HTML spans per character (`<span style="color:#hex">`) — simple, heavy DOM
+    - (b) Canvas text rendering — better perf, loses text selectability
+    - (c) Pre-built HTML string with `dangerouslySetInnerHTML` — good middle ground
+  - **Color family mapping:** User picks preset (e.g., "Blue"), define families as HSL ranges (H=200-260). Map pixel brightness → lightness (L), keep hue within family range → light blue, royal blue, navy naturally
+  - **Presets:** Main color spectrum sections (Red, Orange, Yellow, Green, Cyan, Blue, Purple, Pink)
+  - Store additions: `colorMode: 'monochrome' | 'color' | 'emoji'`, `selectedColorFamily: string`
+  - **Architecture:** Create dedicated child component for color mode rendering, separate from default monochrome `<pre>`. Keeps segmentation-free pipeline isolated and allows experimenting with rendering approaches (a/b/c)
+  - **Complexity:** High — requires output format rethink and new render path
+
+- ⏳ **[P3-F5] Emoji Mode**
+  - **Two sub-modes:**
+    - **Color emojis only:** 🟥🟧🟨🟩🟦🟪🟫⬛⬜ (9 square emojis) — map pixel color to nearest emoji by hue+brightness. Produces mosaic/pixel-art effect
+    - **All emojis:** Curated set mapped by brightness/texture/hue (e.g., ☀️ bright, 🌑 dark, 🌊 blue). Needs a mapping table in constants
+  - **Higher density than typical emoji use:** Break webcam feed into smaller cells and reduce emoji text size to show more emojis per frame. Keep density same as or slightly above ASCII mode to improve accuracy in edge cases and varying lighting. Target: no perceptible lag on modern hardware
+  - **Rendering:** Emojis are wider than monospace chars — use CSS grid with fixed cell sizes instead of `<pre>` monospace spacing for cross-platform consistency
+  - **Builds on P3-F4 infrastructure:** Reuses per-character rendering system and `colorMode` state
+  - Store additions: `emojiSubMode: 'color-squares' | 'all-emojis'`
+  - Constants additions: `EMOJI_COLOR_SQUARES`, `EMOJI_FULL_SET` mapping tables
+  - **Complexity:** Medium — tricky part is consistent emoji sizing across platforms
+
+- ⏳ **[P3-F6] Cross-Browser Testing & Compatibility**
+  - Test all modes across Chrome, Firefox, Safari (desktop & mobile)
+  - Verify emoji rendering consistency across OS/browser combinations
+  - Test responsive layout on mobile/tablet/desktop
+  - Performance profiling across browsers
+  - Fix any browser-specific rendering issues discovered
 
 ### Design Decisions
 
-- **Monochrome First**: Initial implementation focuses on monochrome ASCII. Color support planned for future.
+- **Three Rendering Modes**: Default (monochrome + segmentation), Advanced Color (per-character coloring, no segmentation), and Emoji (color squares or full emoji set). Each mode has its own rendering path.
+- **Advanced Color Mode as Separate Component**: Color mode gets a dedicated child component, isolated from segmentation pipeline, to allow experimenting with rendering approaches (spans vs canvas vs innerHTML).
 - **Character Flexibility**: Support for multiple character sets including custom user input.
 - **Client-Side Only**: All processing happens in the browser, no backend needed.
 - **Responsive Design**: Mobile-first approach with Tailwind breakpoints.
 - **Quality-First Approach**: Prioritize core conversion quality (segmentation, sharpness, lighting robustness) before adding features like image upload, export, or control panels.
-- **Iterative Quality Improvements**: Follow phased approach (Quick Wins → Core Quality → Advanced Features) to deliver visible improvements incrementally.
+- **Iterative Quality Improvements**: Follow phased approach (Quick Wins → Core Quality → New Features) to deliver visible improvements incrementally.
+- **Store Cleanup Convention**: For every store action that acquires a resource (starts a loop, creates an instance, opens a connection), there must be a corresponding action that releases it. Acquire/release pairs: `initSegmentation`/`stopWebcam` (nulls segmenter), `startRenderLoop`/`stopRenderLoop` (cancels rAF), `startWebcam`/`stopWebcam` (stops stream).
+- **Screenshot via Off-Screen Canvas**: High-res export uses programmatic canvas rendering (not DOM capture) for resolution control across all modes.
 
 ### Browser APIs Used
 
 - `navigator.mediaDevices.getUserMedia()` - Webcam access
-- Canvas API - Image/video processing
+- Canvas API - Image/video processing, off-screen screenshot rendering
 - `requestAnimationFrame` - Smooth rendering
 - `navigator.clipboard` - Copy functionality
 - FileReader API - Image upload handling
+- `canvas.toBlob()` - PNG export for screenshots
+- `navigator.share()` - Mobile share/save (screenshot feature fallback)
+- Drag and Drop API - Image upload
 
 ### Deployment
 
@@ -316,84 +394,14 @@ All dependencies installed with pnpm:
 pnpm add @tanstack/react-router zustand
 ```
 
-## Testing Strategy
-
-### Manual Testing Checklist
-
-#### Core Functionality
-
-- [x] Webcam permission and stream
-- [x] Basic ASCII conversion
-- [x] Background removal toggle
-- [ ] Image upload (various formats) - Later phase
-- [ ] Each character set conversion - Later phase
-- [ ] Resolution/contrast adjustments - Later phase
-- [ ] Export to all formats - Later phase
-- [ ] Responsive layout (mobile/tablet/desktop)
-- [ ] Browser compatibility (Chrome, Firefox, Safari)
-
-#### Quality Testing (Post-Phase 1 & 2 Implementation)
-
-- [ ] **Segmentation Edge Quality**
-  - [ ] Person wearing same color as background
-  - [ ] Hair/fur boundaries (fine details)
-  - [ ] Transparent objects (glass, water bottle)
-  - [ ] Fast motion (hand waving, head turning)
-
-- [ ] **Lighting Conditions** (Goal: Work well in ALL lighting)
-  - [ ] Yellow/warm light (tungsten bulbs)
-  - [ ] Cool light (fluorescent, LED daylight)
-  - [ ] Mixed lighting (window + indoor)
-  - [ ] Low light (evening/dim room)
-  - [ ] Sunset/red-tinted light
-  - [ ] Backlit scenarios
-
-- [ ] **Sharpness & Detail**
-  - [ ] Facial features clearly visible
-  - [ ] Text on clothing readable
-  - [ ] Hand gestures distinguishable
-  - [ ] Compare side-by-side with Google Meet background blur quality
-
-### Performance Testing
-
-- [x] Frame rate during webcam capture (baseline)
-- [ ] Frame rate after Phase 1 optimizations (target: 30fps maintained)
-- [ ] Frame rate after Phase 2 additions (ensure no degradation)
-- [ ] Conversion speed with different ASCII widths (80, 120, 160)
-- [ ] Memory usage over time (check for leaks)
-- [ ] CPU usage (should not pin CPU at 100%)
-- [ ] Performance on lower-end devices (test with throttling)
-
 ## Future Enhancements (Out of Current Scope)
 
-### Phase 3: Advanced Features (1-2 weeks)
+### Phase 4: Performance & Quality (Post-Phase 3)
 
-**Goal:** Production-ready quality for all edge cases
-
-- **[P3-E1] Quality/Performance Presets**
-  - User-selectable quality levels (Low/Medium/High/Ultra)
-  - Automatic device capability detection
-  - **Effort:** 🟡 MEDIUM (80 lines, 2-3 hours)
-
-- **[P3-A5] Bilateral Filter**
-  - Edge-aware smoothing that preserves sharp boundaries
-  - Smooths flat regions without destroying detail
-  - **Effort:** 🔴 HIGH (100 lines, 3-4 hours)
-
-- **[P3-C4] Edge-Weighted Character Selection**
-  - Calculate edge strength per cell using Sobel operator
-  - High edge → angular chars (|, /, \, #)
-  - Low edge → smooth chars (., :, -)
-  - **Effort:** 🔴 HIGH (100 lines, 4-5 hours)
-
-- **[P3-D5] Web Workers for Parallel Processing**
+- **[P4-D5] Web Workers for Parallel Processing**
   - Offload ASCII conversion to background thread
   - Non-blocking UI updates
   - **Effort:** 🔴 HIGH (200 lines, 8-10 hours)
-
-### Phase 4: Revolutionary Features (2-4 weeks)
-
-**Goal:** Industry-leading performance and quality
 
 - **[P4-D6] WebGL/GPU Acceleration**
   - Implement brightness calculation as fragment shader
@@ -404,13 +412,11 @@ pnpm add @tanstack/react-router zustand
 - **[P4-C7] Directional Character Mapping**
   - Calculate edge direction per cell (gradient angle)
   - Match character orientation to edge direction
-  - Revolutionary ASCII art quality
   - **Effort:** 🔴 HIGH (150 lines, 6-8 hours)
 
 - **[P4-E3] Pipeline Architecture with Buffers**
   - Decouple video → segmentation → ASCII stages
   - Independent processing with queues
-  - Better error isolation and maintainability
   - **Effort:** 🔴 HIGH (200 lines, 8-10 hours)
 
 - **[P4-D3] Incremental Tile-Based Processing**
@@ -420,8 +426,6 @@ pnpm add @tanstack/react-router zustand
 
 ### Additional Future Features
 
-- **[P3-B4] CLAHE** (Contrast Limited Adaptive Histogram Equalization) - Handles extreme lighting conditions
-- Color ASCII support (ANSI/HTML colored characters)
 - Video recording and export
 - Social media sharing
 - ASCII art gallery/presets

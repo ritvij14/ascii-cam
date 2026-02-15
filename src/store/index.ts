@@ -1,3 +1,4 @@
+import { SelfieSegmentation } from '@mediapipe/selfie_segmentation';
 import { create } from 'zustand';
 import { CHARACTER_SETS, DEFAULT_CHARSET } from '../constants/character-sets';
 
@@ -7,6 +8,17 @@ interface AppState {
   webcamError: string | null;
   videoRef: HTMLVideoElement | null;
   streamRef: MediaStream | null;
+
+  // DOM refs for canvas processing
+  canvasRef: HTMLCanvasElement | null;
+  maskCanvasRef: HTMLCanvasElement | null;
+
+  // Segmentation
+  segmenter: SelfieSegmentation | null;
+  segmentationLoading: boolean;
+
+  // Render loop
+  animationFrameId: number | null;
 
   // ASCII State
   asciiOutput: string;
@@ -32,6 +44,9 @@ interface AppActions {
   updateAppState: (partialState: Partial<AppState>) => void;
 
   // Business Logic Actions
+  initSegmentation: () => Promise<void>;
+  startRenderLoop: () => void;
+  stopRenderLoop: () => void;
   startWebcam: () => Promise<void>;
   stopWebcam: () => void;
   updateAsciiOutput: (imageData: ImageData, maskData?: ImageData) => void;
@@ -45,6 +60,11 @@ export const useStore = create<AppStore>((set, get) => ({
   webcamError: null,
   videoRef: null,
   streamRef: null,
+  canvasRef: null,
+  maskCanvasRef: null,
+  segmenter: null,
+  segmentationLoading: true,
+  animationFrameId: null,
   asciiOutput: '',
   asciiWidth: 120,
   selectedCharset: DEFAULT_CHARSET,
@@ -207,6 +227,125 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ asciiOutput: parts.join('') });
   },
 
+  initSegmentation: async () => {
+    try {
+      const selfieSegmentation = new SelfieSegmentation({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`,
+      });
+
+      selfieSegmentation.setOptions({
+        modelSelection: 1,
+        selfieMode: true,
+      });
+
+      selfieSegmentation.onResults((results) => {
+        const { maskCanvasRef } = get();
+        if (maskCanvasRef && results.segmentationMask) {
+          const maskCtx = maskCanvasRef.getContext('2d');
+          if (maskCtx) {
+            maskCanvasRef.width = results.segmentationMask.width;
+            maskCanvasRef.height = results.segmentationMask.height;
+            maskCtx.drawImage(results.segmentationMask, 0, 0);
+          }
+        }
+      });
+
+      set({ segmenter: selfieSegmentation, segmentationLoading: false });
+    } catch (err) {
+      console.error('Failed to initialize segmentation:', err);
+      set({ segmentationLoading: false });
+    }
+  },
+
+  startRenderLoop: () => {
+    const { videoRef, canvasRef, maskCanvasRef } = get();
+    if (!videoRef || !canvasRef || !maskCanvasRef) return;
+
+    const ctx = canvasRef.getContext('2d');
+    const maskCtx = maskCanvasRef.getContext('2d');
+    if (!ctx || !maskCtx) return;
+
+    let lastFrameTime = 0;
+    const targetFrameMs = 33;
+    let aspectChecked = false;
+
+    const captureFrame = async (timestamp: number) => {
+      if (timestamp - lastFrameTime < targetFrameMs) {
+        set({ animationFrameId: requestAnimationFrame(captureFrame) });
+        return;
+      }
+
+      if (videoRef.readyState === videoRef.HAVE_ENOUGH_DATA) {
+        if (!aspectChecked) {
+          aspectChecked = true;
+          if (videoRef.videoHeight > videoRef.videoWidth) {
+            set({ asciiWidth: 80 });
+          }
+        }
+
+        const frameStart = performance.now();
+
+        canvasRef.width = videoRef.videoWidth;
+        canvasRef.height = videoRef.videoHeight;
+        maskCanvasRef.width = videoRef.videoWidth;
+        maskCanvasRef.height = videoRef.videoHeight;
+
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(videoRef, -canvasRef.width, 0);
+        ctx.restore();
+
+        const imageData = ctx.getImageData(0, 0, canvasRef.width, canvasRef.height);
+
+        let maskData: ImageData | undefined;
+        let segTime = 0;
+        const { segmenter, segmentationLoading } = get();
+        if (segmenter && !segmentationLoading) {
+          try {
+            const segStart = performance.now();
+            await segmenter.send({ image: videoRef });
+            maskData = maskCtx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
+            segTime = performance.now() - segStart;
+          } catch (err) {
+            console.error('Segmentation error:', err);
+          }
+        }
+
+        const asciiStart = performance.now();
+        get().updateAsciiOutput(imageData, maskData);
+        const asciiTime = performance.now() - asciiStart;
+
+        const frameTime = performance.now() - frameStart;
+        lastFrameTime = timestamp;
+
+        const { asciiWidth } = get();
+        set({
+          perfMetrics: {
+            fps: Math.round(1000 / Math.max(frameTime, 1)),
+            frameTimeMs: Math.round(frameTime * 10) / 10,
+            segTimeMs: Math.round(segTime * 10) / 10,
+            asciiTimeMs: Math.round(asciiTime * 10) / 10,
+            resolution: `${videoRef.videoWidth}x${videoRef.videoHeight}`,
+            gridSize: `${asciiWidth}x${Math.floor(videoRef.videoHeight / (Math.floor(videoRef.videoWidth / asciiWidth) * 2))}`,
+          },
+        });
+      }
+
+      set({ animationFrameId: requestAnimationFrame(captureFrame) });
+    };
+
+    set({ animationFrameId: requestAnimationFrame(captureFrame) });
+  },
+
+  stopRenderLoop: () => {
+    const { animationFrameId } = get();
+    if (animationFrameId) {
+      cancelAnimationFrame(animationFrameId);
+    }
+    set({ animationFrameId: null });
+  },
+
   startWebcam: async () => {
     const { videoRef } = get();
 
@@ -218,6 +357,11 @@ export const useStore = create<AppStore>((set, get) => ({
     try {
       set({ webcamError: null });
 
+      // Lazy init segmentation
+      if (!get().segmenter) {
+        await get().initSegmentation();
+      }
+
       const isMobile = window.innerWidth < 768;
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { height: { ideal: isMobile ? 480 : 720 } },
@@ -227,19 +371,23 @@ export const useStore = create<AppStore>((set, get) => ({
       videoRef.srcObject = stream;
       set({
         streamRef: stream,
-        isWebcamActive: true
+        isWebcamActive: true,
       });
+
+      get().startRenderLoop();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to access webcam';
       set({
         webcamError: errorMessage,
-        isWebcamActive: false
+        isWebcamActive: false,
       });
     }
   },
 
   stopWebcam: () => {
     const { streamRef, videoRef } = get();
+
+    get().stopRenderLoop();
 
     if (streamRef) {
       streamRef.getTracks().forEach(track => track.stop());
@@ -251,7 +399,9 @@ export const useStore = create<AppStore>((set, get) => ({
 
     set({
       streamRef: null,
-      isWebcamActive: false
+      isWebcamActive: false,
+      segmenter: null,
+      segmentationLoading: true,
     });
   },
 }));
