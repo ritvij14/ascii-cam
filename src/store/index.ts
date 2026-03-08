@@ -1,6 +1,6 @@
 import { SelfieSegmentation } from '@mediapipe/selfie_segmentation';
 import { create } from 'zustand';
-import { CHARACTER_SETS, DEFAULT_CHARSET } from '../constants/character-sets';
+import { CHARACTER_SETS, DEFAULT_CHARSET, rgbToNearestEmoji } from '../constants/character-sets';
 
 interface AppState {
   // Webcam State
@@ -22,8 +22,12 @@ interface AppState {
 
   // ASCII State
   asciiOutput: string;
+  coloredAsciiOutput: string;
+  emojiOutput: { cols: number; rows: string[] };
   asciiWidth: number;
   selectedCharset: string;
+  asciiColor: string;
+  colorMode: 'monochrome' | 'color' | 'emoji';
 
   // Temporal smoothing
   previousMaskData: Uint8ClampedArray | null;
@@ -50,6 +54,8 @@ interface AppActions {
   startWebcam: () => Promise<void>;
   stopWebcam: () => void;
   updateAsciiOutput: (imageData: ImageData, maskData?: ImageData) => void;
+  updateColorAsciiOutput: (imageData: ImageData) => void;
+  updateEmojiOutput: (imageData: ImageData) => void;
 }
 
 type AppStore = AppState & AppActions;
@@ -66,8 +72,12 @@ export const useStore = create<AppStore>((set, get) => ({
   segmentationLoading: true,
   animationFrameId: null,
   asciiOutput: '',
+  coloredAsciiOutput: '',
+  emojiOutput: { cols: 0, rows: [] },
   asciiWidth: 120,
   selectedCharset: DEFAULT_CHARSET,
+  asciiColor: '#00ff00',
+  colorMode: 'monochrome',
   previousMaskData: null,
   perfMetrics: null,
   showPerfOverlay: false,
@@ -227,6 +237,166 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ asciiOutput: parts.join('') });
   },
 
+  updateColorAsciiOutput: (imageData) => {
+    const { asciiWidth, selectedCharset } = get();
+    const charset = CHARACTER_SETS[selectedCharset].characters;
+    const { data, width: imgWidth, height: imgHeight } = imageData;
+
+    const cellWidth = Math.floor(imgWidth / asciiWidth);
+    const cellHeight = Math.floor(cellWidth * 2);
+    const height = Math.floor(imgHeight / cellHeight);
+
+    // Helper: linearize sRGB component
+    const srgbToLinear = (c: number) => {
+      const s = c / 255;
+      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+
+    // Helper: RGB to LAB L* for character selection
+    const rgbToLabL = (r: number, g: number, b: number): number => {
+      const y = 0.2126 * srgbToLinear(r) + 0.7152 * srgbToLinear(g) + 0.0722 * srgbToLinear(b);
+      return y > 0.008856 ? 116 * Math.cbrt(y) - 16 : 903.3 * y;
+    };
+
+    // First pass: per-cell average RGB and LAB brightness
+    const cellR = new Float32Array(asciiWidth * height);
+    const cellG = new Float32Array(asciiWidth * height);
+    const cellB = new Float32Array(asciiWidth * height);
+    const cellBrightness = new Float32Array(asciiWidth * height);
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < asciiWidth; x++) {
+        let totalR = 0, totalG = 0, totalB = 0, totalL = 0, pixelCount = 0;
+        for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
+          for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
+            const i = (cy * imgWidth + cx) * 4;
+            totalR += data[i];
+            totalG += data[i + 1];
+            totalB += data[i + 2];
+            totalL += rgbToLabL(data[i], data[i + 1], data[i + 2]);
+            pixelCount++;
+          }
+        }
+        const idx = y * asciiWidth + x;
+        cellR[idx] = totalR / pixelCount;
+        cellG[idx] = totalG / pixelCount;
+        cellB[idx] = totalB / pixelCount;
+        cellBrightness[idx] = totalL / pixelCount;
+      }
+    }
+
+    // Second pass: unsharp masking + build colored HTML string
+    const sharpenK = 0.5;
+    const parts: string[] = [];
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < asciiWidth; x++) {
+        const idx = y * asciiWidth + x;
+        const original = cellBrightness[idx];
+
+        let blurSum = 0, blurRSum = 0, blurGSum = 0, blurBSum = 0, blurCount = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const ny = y + dy, nx = x + dx;
+            if (ny >= 0 && ny < height && nx >= 0 && nx < asciiWidth) {
+              const nidx = ny * asciiWidth + nx;
+              blurSum += cellBrightness[nidx];
+              blurRSum += cellR[nidx];
+              blurGSum += cellG[nidx];
+              blurBSum += cellB[nidx];
+              blurCount++;
+            }
+          }
+        }
+        const sharpened = Math.max(0, Math.min(100, original + sharpenK * (original - blurSum / blurCount)));
+        const charIndex = Math.floor((sharpened / 100) * (charset.length - 1));
+        const char = charset[charIndex];
+
+        // Unsharp mask on color channels (k=0.8 for stronger color edge pop)
+        const colorK = 0.8;
+        const sR = Math.max(0, Math.min(255, cellR[idx] + colorK * (cellR[idx] - blurRSum / blurCount)));
+        const sG = Math.max(0, Math.min(255, cellG[idx] + colorK * (cellG[idx] - blurGSum / blurCount)));
+        const sB = Math.max(0, Math.min(255, cellB[idx] + colorK * (cellB[idx] - blurBSum / blurCount)));
+
+        // Boost color: lift dark floor (gamma 0.55) + boost saturation (1.5x)
+        let cr = sR / 255, cg = sG / 255, cb = sB / 255;
+        // Gamma lift
+        cr = Math.pow(cr, 0.55); cg = Math.pow(cg, 0.55); cb = Math.pow(cb, 0.55);
+        // Saturation boost via HSL
+        const cmax = Math.max(cr, cg, cb), cmin = Math.min(cr, cg, cb);
+        const l = (cmax + cmin) / 2;
+        const d = cmax - cmin;
+        if (d > 0) {
+          const s = Math.min(1, (d / (1 - Math.abs(2 * l - 1))) * 1.5);
+          const chroma = s * (1 - Math.abs(2 * l - 1));
+          let h = 0;
+          if (cmax === cr) h = ((cg - cb) / d + 6) % 6;
+          else if (cmax === cg) h = (cb - cr) / d + 2;
+          else h = (cr - cg) / d + 4;
+          const x = chroma * (1 - Math.abs(h % 2 - 1));
+          const m = l - chroma / 2;
+          const hi = Math.floor(h);
+          const [r1, g1, b1] = hi === 0 ? [chroma, x, 0] : hi === 1 ? [x, chroma, 0] :
+            hi === 2 ? [0, chroma, x] : hi === 3 ? [0, x, chroma] :
+            hi === 4 ? [x, 0, chroma] : [chroma, 0, x];
+          cr = Math.min(1, r1 + m); cg = Math.min(1, g1 + m); cb = Math.min(1, b1 + m);
+        }
+        const r = Math.round(cr * 255).toString(16).padStart(2, '0');
+        const g = Math.round(cg * 255).toString(16).padStart(2, '0');
+        const b = Math.round(cb * 255).toString(16).padStart(2, '0');
+        parts.push(`<span style="color:#${r}${g}${b}">${char}</span>`);
+      }
+      parts.push('\n');
+    }
+
+    set({ coloredAsciiOutput: parts.join('') });
+  },
+
+  updateEmojiOutput: (imageData) => {
+    const { asciiWidth } = get();
+    const { data, width: imgWidth, height: imgHeight } = imageData;
+
+    // Square cells: 1:1 aspect ratio (emojis are square, unlike ASCII chars)
+    const cellSize = Math.floor(imgWidth / asciiWidth);
+    const height = Math.floor(imgHeight / cellSize);
+
+    // White balance: gray world algorithm
+    const totalPixels = imgWidth * imgHeight;
+    let sumR = 0, sumG = 0, sumB = 0;
+    for (let i = 0; i < data.length; i += 16) {
+      sumR += data[i]; sumG += data[i + 1]; sumB += data[i + 2];
+    }
+    const sampleCount = Math.ceil(totalPixels / 4);
+    const grayMean = (sumR + sumG + sumB) / (3 * sampleCount);
+    const wbR = sumR > 0 ? grayMean / (sumR / sampleCount) : 1;
+    const wbG = sumG > 0 ? grayMean / (sumG / sampleCount) : 1;
+    const wbB = sumB > 0 ? grayMean / (sumB / sampleCount) : 1;
+
+    const rows: string[] = [];
+    for (let y = 0; y < height; y++) {
+      const rowEmojis: string[] = [];
+      for (let x = 0; x < asciiWidth; x++) {
+        let totalR = 0, totalG = 0, totalB = 0, pixelCount = 0;
+        for (let cy = y * cellSize; cy < y * cellSize + cellSize; cy++) {
+          for (let cx = x * cellSize; cx < x * cellSize + cellSize; cx++) {
+            const i = (cy * imgWidth + cx) * 4;
+            totalR += data[i];
+            totalG += data[i + 1];
+            totalB += data[i + 2];
+            pixelCount++;
+          }
+        }
+        const r = Math.min(255, (totalR / pixelCount) * wbR);
+        const g = Math.min(255, (totalG / pixelCount) * wbG);
+        const b = Math.min(255, (totalB / pixelCount) * wbB);
+        rowEmojis.push(rgbToNearestEmoji(r, g, b));
+      }
+      rows.push(rowEmojis.join(''));
+    }
+
+    set({ emojiOutput: { cols: asciiWidth, rows } });
+  },
+
   initSegmentation: async () => {
     try {
       const selfieSegmentation = new SelfieSegmentation({
@@ -300,8 +470,8 @@ export const useStore = create<AppStore>((set, get) => ({
 
         let maskData: ImageData | undefined;
         let segTime = 0;
-        const { segmenter, segmentationLoading } = get();
-        if (segmenter && !segmentationLoading) {
+        const { segmenter, segmentationLoading, colorMode } = get();
+        if (colorMode === 'monochrome' && segmenter && !segmentationLoading) {
           try {
             const segStart = performance.now();
             await segmenter.send({ image: videoRef });
@@ -313,7 +483,13 @@ export const useStore = create<AppStore>((set, get) => ({
         }
 
         const asciiStart = performance.now();
-        get().updateAsciiOutput(imageData, maskData);
+        if (colorMode === 'color') {
+          get().updateColorAsciiOutput(imageData);
+        } else if (colorMode === 'emoji') {
+          get().updateEmojiOutput(imageData);
+        } else {
+          get().updateAsciiOutput(imageData, maskData);
+        }
         const asciiTime = performance.now() - asciiStart;
 
         const frameTime = performance.now() - frameStart;

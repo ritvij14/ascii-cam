@@ -234,7 +234,8 @@ pnpm run preview
 - ✅ Zustand state management
 - ✅ Basic ASCII conversion engine
 - ✅ Webcam integration with MediaPipe Selfie Segmentation
-- ✅ Background removal toggle
+- ✅ Background removal (always-on, no UI toggle — segmentation runs automatically on every frame)
+- ✅ Character sets defined in constants (`src/constants/character-sets.ts`) and wired to store (`selectedCharset`), but no UI picker exists yet
 
 #### 🎯 Phase 1: Quick Wins (1-2 hours total) - PRIORITY
 
@@ -296,14 +297,11 @@ pnpm run preview
 
 **Goal:** Add multiple rendering modes, color support, screenshot/export, and image conversion. Implementation order chosen to minimize rework (simpler changes first, shared infrastructure built early for later features).
 
-- ⏳ **[P3-F1] Default Mode Color Customization**
-  - Current: ASCII output is hardcoded green (`#00ff00`) via inline style on `<pre>`
-  - Add `asciiColor: string` to store (default `#00ff00`)
-  - **Preset colors:** Row of circular swatches (green, amber, cyan, white, red, purple, blue) — single click to apply
-  - **Color wheel (advanced):** Expandable HSL color picker using `react-colorful` (~2KB) or custom HSL slider
-  - Bind `<pre>` style `color` to `asciiColor` from store
-  - UI: Small collapsible panel (left side or bottom toolbar)
-  - **Complexity:** Low — purely UI work, zero conversion pipeline changes
+- ✅ **[P3-F1] Default Mode Color Customization**
+  - `asciiColor: string` in store (default `#00ff00`), bound to `<pre>` style `color`
+  - 7 preset swatches (green, amber, cyan, white, red, purple, blue) — single click to apply
+  - `react-colorful` `HexColorPicker` color wheel, expandable from a palette button in the bottom controls
+  - UI: collapsible panel above the bottom button row
 
 - ⏳ **[P3-F2] Image Conversion Tab**
   - Add second route via TanStack Router: `/` for webcam, `/image` for upload
@@ -338,16 +336,13 @@ pnpm run preview
   - **Architecture:** Create dedicated child component for color mode rendering, separate from default monochrome `<pre>`. Keeps segmentation-free pipeline isolated and allows experimenting with rendering approaches (a/b/c)
   - **Complexity:** High — requires output format rethink and new render path
 
-- ⏳ **[P3-F5] Emoji Mode**
-  - **Two sub-modes:**
-    - **Color emojis only:** 🟥🟧🟨🟩🟦🟪🟫⬛⬜ (9 square emojis) — map pixel color to nearest emoji by hue+brightness. Produces mosaic/pixel-art effect
-    - **All emojis:** Curated set mapped by brightness/texture/hue (e.g., ☀️ bright, 🌑 dark, 🌊 blue). Needs a mapping table in constants
-  - **Higher density than typical emoji use:** Break webcam feed into smaller cells and reduce emoji text size to show more emojis per frame. Keep density same as or slightly above ASCII mode to improve accuracy in edge cases and varying lighting. Target: no perceptible lag on modern hardware
-  - **Rendering:** Emojis are wider than monospace chars — use CSS grid with fixed cell sizes instead of `<pre>` monospace spacing for cross-platform consistency
-  - **Builds on P3-F4 infrastructure:** Reuses per-character rendering system and `colorMode` state
-  - Store additions: `emojiSubMode: 'color-squares' | 'all-emojis'`
-  - Constants additions: `EMOJI_COLOR_SQUARES`, `EMOJI_FULL_SET` mapping tables
-  - **Complexity:** Medium — tricky part is consistent emoji sizing across platforms
+- ✅ **[P3-F5] Emoji Mode — Color-Matched Palette (~23 emojis)**
+  - `colorMode` extended to `'monochrome' | 'color' | 'emoji'`
+  - `emojiOutput: { cols: number; rows: string[] }` in store, computed by `updateEmojiOutput(imageData)` action
+  - `EMOJI_COLOR_PALETTE`: 23 single-dominant-color emojis each with a measured RGB value (darks, browns, skin tones, reds/oranges/yellows/greens/blues/purples/pinks/whites)
+  - `rgbToNearestEmoji(r,g,b)`: picks emoji by minimum squared Euclidean RGB distance
+  - Pipeline: white balance (gray world) → per-cell avg RGB → nearest emoji by color distance
+  - Square cells (1:1 ratio); `EmojiGrid` in `src/EmojiGrid.tsx`; no segmentation; charset picker hidden in emoji mode
 
 - ⏳ **[P3-F6] Cross-Browser Testing & Compatibility**
   - Test all modes across Chrome, Firefox, Safari (desktop & mobile)
