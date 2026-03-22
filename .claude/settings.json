@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": ["Bash(pnpm run build:*)"]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/generate-tree.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/generate-tree.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

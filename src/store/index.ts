@@ -29,6 +29,9 @@ interface AppState {
   asciiColor: string;
   colorMode: 'monochrome' | 'color' | 'emoji';
 
+  // Image tab
+  uploadedImage: string | null; // base64 data URL
+
   // Temporal smoothing
   previousMaskData: Uint8ClampedArray | null;
 
@@ -48,6 +51,7 @@ interface AppActions {
   updateAppState: (partialState: Partial<AppState>) => void;
 
   // Business Logic Actions
+  processImage: (dataUrl?: string) => Promise<void>;
   initSegmentation: () => Promise<void>;
   startRenderLoop: () => void;
   stopRenderLoop: () => void;
@@ -56,6 +60,7 @@ interface AppActions {
   updateAsciiOutput: (imageData: ImageData, maskData?: ImageData) => void;
   updateColorAsciiOutput: (imageData: ImageData) => void;
   updateEmojiOutput: (imageData: ImageData) => void;
+  takeScreenshot: () => Promise<void>;
 }
 
 type AppStore = AppState & AppActions;
@@ -78,12 +83,52 @@ export const useStore = create<AppStore>((set, get) => ({
   selectedCharset: DEFAULT_CHARSET,
   asciiColor: '#00ff00',
   colorMode: 'monochrome',
+  uploadedImage: null,
   previousMaskData: null,
   perfMetrics: null,
   showPerfOverlay: false,
 
   // Actions
   updateAppState: (partialState) => set(partialState),
+
+  processImage: async (dataUrl?: string) => {
+    const { canvasRef, maskCanvasRef, colorMode } = get();
+    const src = dataUrl ?? get().uploadedImage;
+    if (!src || !canvasRef || !maskCanvasRef) return;
+
+    const img = new Image();
+    img.src = src;
+    await new Promise((resolve) => { img.onload = resolve; });
+
+    canvasRef.width = img.width;
+    canvasRef.height = img.height;
+    const ctx = canvasRef.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(img, 0, 0);
+    const imageData = ctx.getImageData(0, 0, img.width, img.height);
+
+    if (colorMode === 'color') {
+      get().updateColorAsciiOutput(imageData);
+    } else if (colorMode === 'emoji') {
+      get().updateEmojiOutput(imageData);
+    } else {
+      // monochrome: run segmentation if segmenter available
+      let maskData: ImageData | undefined;
+      const { segmenter, segmentationLoading } = get();
+      if (segmenter && !segmentationLoading && maskCanvasRef) {
+        try {
+          maskCanvasRef.width = img.width;
+          maskCanvasRef.height = img.height;
+          await segmenter.send({ image: img });
+          const maskCtx = maskCanvasRef.getContext('2d');
+          if (maskCtx) {
+            maskData = maskCtx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
+          }
+        } catch (_) { /* skip mask on error */ }
+      }
+      get().updateAsciiOutput(imageData, maskData);
+    }
+  },
 
   updateAsciiOutput: (imageData, maskData) => {
     const { asciiWidth, selectedCharset, previousMaskData } = get();
@@ -558,6 +603,95 @@ export const useStore = create<AppStore>((set, get) => ({
         isWebcamActive: false,
       });
     }
+  },
+
+  takeScreenshot: async () => {
+    const { colorMode, asciiOutput, coloredAsciiOutput, emojiOutput, asciiColor, selectedCharset } = get();
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const SCALE = 3;
+    const FONT_SIZE = 14 * SCALE;
+    const CHAR_W = FONT_SIZE * 0.6;
+    const CHAR_H = FONT_SIZE;
+
+    if (colorMode === 'emoji') {
+      const { cols, rows } = emojiOutput;
+      if (!rows.length) return;
+      const EMOJI_SIZE = 20 * SCALE;
+      canvas.width = cols * EMOJI_SIZE;
+      canvas.height = rows.length * EMOJI_SIZE;
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.font = `${EMOJI_SIZE * 0.9}px serif`;
+      ctx.textBaseline = 'top';
+      for (let y = 0; y < rows.length; y++) {
+        const chars = [...rows[y]]; // handle multi-codepoint emoji
+        for (let x = 0; x < chars.length; x++) {
+          ctx.fillText(chars[x], x * EMOJI_SIZE, y * EMOJI_SIZE);
+        }
+      }
+    } else if (colorMode === 'color') {
+      // Parse colored HTML spans into (char, color) pairs
+      const parsed: { char: string; color: string }[][] = [];
+      const spanRe = /<span style="color:(#[0-9a-f]{6})">(.)<\/span>/g;
+      let maxCols = 0;
+      for (const line of coloredAsciiOutput.split('\n')) {
+        const row: { char: string; color: string }[] = [];
+        let m;
+        spanRe.lastIndex = 0;
+        while ((m = spanRe.exec(line)) !== null) {
+          row.push({ color: m[1], char: m[2] });
+        }
+        if (row.length > 0) { parsed.push(row); maxCols = Math.max(maxCols, row.length); }
+      }
+      if (!parsed.length) return;
+      canvas.width = maxCols * CHAR_W;
+      canvas.height = parsed.length * CHAR_H;
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.font = `${FONT_SIZE}px monospace`;
+      ctx.textBaseline = 'top';
+      for (let y = 0; y < parsed.length; y++) {
+        for (let x = 0; x < parsed[y].length; x++) {
+          const { char, color } = parsed[y][x];
+          ctx.fillStyle = color;
+          ctx.fillText(char, x * CHAR_W, y * CHAR_H);
+        }
+      }
+    } else {
+      // monochrome
+      const lines = asciiOutput.split('\n').filter(l => l.length > 0);
+      if (!lines.length) return;
+      const cols = Math.max(...lines.map(l => l.length));
+      canvas.width = cols * CHAR_W;
+      canvas.height = lines.length * CHAR_H;
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = asciiColor;
+      ctx.font = `${FONT_SIZE}px monospace`;
+      ctx.textBaseline = 'top';
+      for (let y = 0; y < lines.length; y++) {
+        ctx.fillText(lines[y], 0, y * CHAR_H);
+      }
+    }
+
+    const filename = `ascii-cam-${Date.now()}.png`;
+    canvas.toBlob(async (blob) => {
+      if (!blob) return;
+      if (navigator.share && navigator.canShare?.({ files: [new File([blob], filename, { type: 'image/png' })] })) {
+        await navigator.share({ files: [new File([blob], filename, { type: 'image/png' })] });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+    }, 'image/png');
   },
 
   stopWebcam: () => {

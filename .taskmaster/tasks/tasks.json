@@ -1,0 +1,592 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": "1",
+        "title": "Initialize project foundation and dependencies",
+        "description": "Set up Vite 7 + React 18 + TypeScript 5 project with pnpm, configure Tailwind CSS v4, and install core dependencies",
+        "details": "1. Run `pnpm create vite@latest . --template react-swc-ts` to initialize Vite 7 with React 18 and SWC\n2. Install dependencies: `pnpm add zustand@5 @tanstack/react-router@1 react-colorful@5 @mediapipe/selfie_segmentation@0.1`\n3. Install Tailwind CSS v4: `pnpm add -D tailwindcss@next @tailwindcss/vite@next`\n4. Configure `vite.config.ts` with `@tailwindcss/vite` plugin\n5. Create `src/index.css` with `@import \"tailwindcss\"`\n6. Configure `tsconfig.json` with strict mode, ES2020 target, ESNext modules, path aliases\n7. Update `index.html` with single `<div id=\"root\"></div>`\n8. Verify build works: `pnpm run dev`",
+        "testStrategy": "Run `pnpm run dev` and verify dev server starts without errors. Run `pnpm run build` and verify TypeScript compilation succeeds.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.574Z"
+      },
+      {
+        "id": "2",
+        "title": "Create character sets constants module",
+        "description": "Implement CHARACTER_SETS, EMOJI_COLOR_PALETTE, and rgbToNearestEmoji helper in src/constants/character-sets.ts",
+        "details": "Create `src/constants/character-sets.ts` as pure data module:\n\n```ts\nexport const CHARACTER_SETS = {\n  MINIMAL: { name: 'Minimal', chars: ' .:-=+*#%@' },\n  STANDARD: { name: 'Standard', chars: ' .\\'^\"`,:;Il!i><~+_-?][}{1)(|\\\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$' },\n  BLOCKS: { name: 'Blocks', chars: ' ░▒▓█' }\n} as const;\n\nexport const EMOJI_COLOR_PALETTE = [\n  { emoji: '⬛', rgb: [0, 0, 0] },\n  { emoji: '🖤', rgb: [30, 30, 30] },\n  { emoji: '🤎', rgb: [139, 69, 19] },\n  { emoji: '🟫', rgb: [165, 42, 42] },\n  // ... 23 total entries matching PRD appendix\n] as const;\n\nexport function rgbToNearestEmoji(r: number, g: number, b: number): string {\n  let minDist = Infinity;\n  let nearest = EMOJI_COLOR_PALETTE[0].emoji;\n  for (const { emoji, rgb: [er, eg, eb] } of EMOJI_COLOR_PALETTE) {\n    const dist = (r - er) ** 2 + (g - eg) ** 2 + (b - eb) ** 2; // squared Euclidean\n    if (dist < minDist) { minDist = dist; nearest = emoji; }\n  }\n  return nearest;\n}\n```",
+        "testStrategy": "Import CHARACTER_SETS and verify all 3 sets exist. Call rgbToNearestEmoji(255, 0, 0) and verify it returns a red emoji. Verify EMOJI_COLOR_PALETTE has exactly 23 entries.",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.580Z"
+      },
+      {
+        "id": "3",
+        "title": "Create Zustand store scaffold with state shape",
+        "description": "Set up src/store/index.ts with complete state interface and initial values, no actions yet",
+        "details": "Create `src/store/index.ts` with Zustand store:\n\n```ts\nimport { create } from 'zustand';\nimport type { SelfieSegmentation } from '@mediapipe/selfie_segmentation';\n\ninterface AppState {\n  // Webcam\n  isWebcamActive: boolean;\n  webcamError: string | null;\n  videoRef: HTMLVideoElement | null;\n  streamRef: MediaStream | null;\n  \n  // Canvas refs\n  canvasRef: HTMLCanvasElement | null;\n  maskCanvasRef: HTMLCanvasElement | null;\n  \n  // Segmentation\n  segmenter: SelfieSegmentation | null;\n  segmentationLoading: boolean;\n  \n  // Render loop\n  animationFrameId: number | null;\n  \n  // ASCII output\n  asciiOutput: string;\n  coloredAsciiOutput: string;\n  emojiOutput: { cols: number; rows: string[] };\n  \n  // Config\n  asciiWidth: number;\n  selectedCharset: 'MINIMAL' | 'STANDARD' | 'BLOCKS';\n  asciiColor: string;\n  colorMode: 'monochrome' | 'color' | 'emoji';\n  \n  // Image tab\n  uploadedImage: string | null;\n  \n  // Processing\n  previousMaskData: Uint8ClampedArray | null;\n  \n  // Perf\n  perfMetrics: { fps: number; frameTimeMs: number; segTimeMs: number; asciiTimeMs: number; resolution: string; gridSize: string } | null;\n  showPerfOverlay: boolean;\n  \n  // Actions placeholder\n  updateAppState: (partial: Partial<AppState>) => void;\n}\n\nexport const useStore = create<AppState>((set) => ({\n  isWebcamActive: false,\n  webcamError: null,\n  videoRef: null,\n  streamRef: null,\n  canvasRef: null,\n  maskCanvasRef: null,\n  segmenter: null,\n  segmentationLoading: false,\n  animationFrameId: null,\n  asciiOutput: '',\n  coloredAsciiOutput: '',\n  emojiOutput: { cols: 0, rows: [] },\n  asciiWidth: 120,\n  selectedCharset: 'STANDARD',\n  asciiColor: '#00ff00',\n  colorMode: 'monochrome',\n  uploadedImage: null,\n  previousMaskData: null,\n  perfMetrics: null,\n  showPerfOverlay: false,\n  updateAppState: (partial) => set(partial),\n}));\n```",
+        "testStrategy": "Import useStore in a test component, call useStore() hook, verify initial state values match defaults (asciiWidth: 120, selectedCharset: 'STANDARD', asciiColor: '#00ff00').",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.582Z"
+      },
+      {
+        "id": "4",
+        "title": "Implement webcam lifecycle actions (startWebcam, stopWebcam)",
+        "description": "Add getUserMedia integration, stream management, and error handling to store actions",
+        "details": "Add to `src/store/index.ts`:\n\n```ts\nstartWebcam: async () => {\n  const { videoRef } = get();\n  if (!videoRef) { set({ webcamError: 'Video element not ready' }); return; }\n  \n  try {\n    const stream = await navigator.mediaDevices.getUserMedia({ \n      video: { facingMode: 'user', width: 640, height: 480 } \n    });\n    videoRef.srcObject = stream;\n    await videoRef.play();\n    set({ streamRef: stream, isWebcamActive: true, webcamError: null });\n  } catch (err) {\n    set({ webcamError: err instanceof Error ? err.message : 'Camera access denied', isWebcamActive: false });\n  }\n},\n\nstopWebcam: () => {\n  const { streamRef, videoRef, animationFrameId, segmenter } = get();\n  \n  if (animationFrameId) cancelAnimationFrame(animationFrameId);\n  if (streamRef) streamRef.getTracks().forEach(track => track.stop());\n  if (videoRef) videoRef.srcObject = null;\n  if (segmenter) segmenter.close();\n  \n  set({ \n    streamRef: null, \n    isWebcamActive: false, \n    animationFrameId: null, \n    segmenter: null,\n    asciiOutput: '',\n    previousMaskData: null\n  });\n},\n```\n\nCall `get()` inside actions to access current state, never pass state as parameters.",
+        "testStrategy": "Create a button that calls startWebcam(). Verify browser prompts for camera permission. After granting, verify videoRef.srcObject is set and isWebcamActive becomes true. Call stopWebcam() and verify stream tracks are stopped and isWebcamActive becomes false.",
+        "priority": "high",
+        "dependencies": [
+          "3"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.584Z"
+      },
+      {
+        "id": "5",
+        "title": "Implement MediaPipe segmentation initialization",
+        "description": "Add initSegmentation action that loads MediaPipe WASM from CDN and creates SelfieSegmentation instance",
+        "details": "Add to store actions:\n\n```ts\ninitSegmentation: async () => {\n  const { segmenter } = get();\n  if (segmenter) return; // already initialized\n  \n  set({ segmentationLoading: true });\n  \n  try {\n    const { SelfieSegmentation } = await import('@mediapipe/selfie_segmentation');\n    const segmenterInstance = new SelfieSegmentation({\n      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`\n    });\n    \n    segmenterInstance.setOptions({ modelSelection: 1 }); // model 1 = general (faster)\n    \n    await new Promise<void>((resolve) => {\n      segmenterInstance.onResults(() => resolve());\n      segmenterInstance.initialize();\n    });\n    \n    set({ segmenter: segmenterInstance, segmentationLoading: false });\n  } catch (err) {\n    console.error('Segmentation init failed:', err);\n    set({ segmentationLoading: false }); // fail silently, continue without segmentation\n  }\n},\n```\n\nCall this lazily on first startWebcam call. WASM cold start takes 1-3s.",
+        "testStrategy": "Call initSegmentation() and wait for segmentationLoading to become false. Verify segmenter is not null. Check browser network tab for CDN requests to jsdelivr.net.",
+        "priority": "high",
+        "dependencies": [
+          "3"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.585Z"
+      },
+      {
+        "id": "6",
+        "title": "Implement monochrome ASCII conversion (updateAsciiOutput)",
+        "description": "Add LAB brightness calculation, segmentation mask with temporal smoothing, unsharp masking, and character mapping",
+        "details": "Add to store actions:\n\n```ts\nupdateAsciiOutput: () => {\n  const { canvasRef, maskCanvasRef, videoRef, asciiWidth, selectedCharset, segmenter, previousMaskData } = get();\n  if (!canvasRef || !videoRef) return;\n  \n  const ctx = canvasRef.getContext('2d')!;\n  const vw = videoRef.videoWidth, vh = videoRef.videoHeight;\n  canvasRef.width = vw; canvasRef.height = vh;\n  ctx.drawImage(videoRef, 0, 0);\n  \n  let maskData: Uint8ClampedArray | null = null;\n  if (segmenter && maskCanvasRef) {\n    // Segmentation mask computation (async, skip on error)\n    // Apply temporal smoothing: 0.7 * current + 0.3 * previous, gamma 0.8\n  }\n  \n  const cellWidth = Math.floor(vw / asciiWidth);\n  const cellHeight = cellWidth * 2; // 2:1 aspect ratio\n  const rows = Math.floor(vh / cellHeight);\n  \n  const chars = CHARACTER_SETS[selectedCharset].chars;\n  let output = '';\n  \n  for (let y = 0; y < rows; y++) {\n    for (let x = 0; x < asciiWidth; x++) {\n      // Compute per-cell average LAB L* brightness with Gray World white balance\n      // Apply unsharp mask (k=0.5, 3x3 neighborhood)\n      // Map sharpened L* to character index\n      const charIndex = 0; // TODO: actual brightness calculation\n      output += chars[charIndex];\n    }\n    output += '\\n';\n  }\n  \n  set({ asciiOutput: output, previousMaskData: maskData });\n},\n```\n\nFull LAB conversion and unsharp mask implementation in Phase 2.",
+        "testStrategy": "Call updateAsciiOutput() after webcam starts. Verify asciiOutput is a multi-line string. Verify character count matches asciiWidth * rows. Verify only characters from selected charset appear in output.",
+        "priority": "high",
+        "dependencies": [
+          "2",
+          "3",
+          "5"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.587Z"
+      },
+      {
+        "id": "7",
+        "title": "Implement render loop with frame rate management",
+        "description": "Add startRenderLoop and stopRenderLoop actions with requestAnimationFrame, 33ms frame skip, and portrait detection",
+        "details": "Add to store actions:\n\n```ts\nstartRenderLoop: () => {\n  const { animationFrameId, videoRef } = get();\n  if (animationFrameId || !videoRef) return;\n  \n  let lastFrameTime = 0;\n  let isFirstFrame = true;\n  const targetFrameTime = 33; // ~30fps\n  \n  const loop = (timestamp: number) => {\n    if (timestamp - lastFrameTime < targetFrameTime) {\n      const id = requestAnimationFrame(loop);\n      set({ animationFrameId: id });\n      return;\n    }\n    \n    const frameStart = performance.now();\n    \n    // Portrait detection (first frame only)\n    if (isFirstFrame && videoRef.videoHeight > videoRef.videoWidth) {\n      set({ asciiWidth: 80 });\n      isFirstFrame = false;\n    }\n    \n    // Call ASCII conversion based on colorMode\n    const { colorMode } = get();\n    if (colorMode === 'monochrome') get().updateAsciiOutput();\n    else if (colorMode === 'color') get().updateColorAsciiOutput();\n    else if (colorMode === 'emoji') get().updateEmojiOutput();\n    \n    lastFrameTime = timestamp;\n    const id = requestAnimationFrame(loop);\n    set({ animationFrameId: id });\n  };\n  \n  const id = requestAnimationFrame(loop);\n  set({ animationFrameId: id });\n},\n\nstopRenderLoop: () => {\n  const { animationFrameId } = get();\n  if (animationFrameId) cancelAnimationFrame(animationFrameId);\n  set({ animationFrameId: null });\n},\n```",
+        "testStrategy": "Call startRenderLoop() and verify animationFrameId is set. Verify updateAsciiOutput is called repeatedly. Verify frame rate stays ~30fps. Call stopRenderLoop() and verify loop stops.",
+        "priority": "high",
+        "dependencies": [
+          "6"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.588Z"
+      },
+      {
+        "id": "8",
+        "title": "Create minimal React UI scaffold with router",
+        "description": "Set up TanStack Router with / and /image routes, create App shell with tab navigation",
+        "details": "1. Create `src/routes/__root.tsx`:\n```tsx\nimport { Outlet, createRootRoute } from '@tanstack/react-router';\nexport const Route = createRootRoute({ component: () => <Outlet /> });\n```\n\n2. Create `src/routes/index.tsx` (webcam tab):\n```tsx\nimport { createFileRoute } from '@tanstack/react-router';\nexport const Route = createFileRoute('/')({ component: WebcamTab });\nfunction WebcamTab() { return <div>Webcam</div>; }\n```\n\n3. Create `src/routes/image.tsx` (image tab):\n```tsx\nimport { createFileRoute } from '@tanstack/react-router';\nexport const Route = createFileRoute('/image')({ component: ImageTab });\nfunction ImageTab() { return <div>Image</div>; }\n```\n\n4. Update `src/main.tsx`:\n```tsx\nimport { StrictMode } from 'react';\nimport ReactDOM from 'react-dom/client';\nimport { RouterProvider, createRouter } from '@tanstack/react-router';\nimport { routeTree } from './routeTree.gen';\nimport './index.css';\n\nconst router = createRouter({ routeTree });\nReactDOM.createRoot(document.getElementById('root')!).render(\n  <StrictMode><RouterProvider router={router} /></StrictMode>\n);\n```\n\n5. Generate route tree: `pnpm tsr generate`",
+        "testStrategy": "Run dev server and navigate to / and /image. Verify both routes render without errors. Verify React DevTools shows Router context.",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.589Z"
+      },
+      {
+        "id": "9",
+        "title": "Create webcam control UI components",
+        "description": "Build Start/Stop Webcam button, webcam preview, and wire to store actions via ref callbacks",
+        "details": "Update `src/routes/index.tsx`:\n\n```tsx\nimport { useStore } from '../store';\n\nfunction WebcamTab() {\n  const { isWebcamActive, webcamError, startWebcam, stopWebcam, initSegmentation } = useStore();\n  \n  const handleToggle = async () => {\n    if (isWebcamActive) {\n      stopWebcam();\n    } else {\n      await initSegmentation(); // lazy init\n      await startWebcam();\n      useStore.getState().startRenderLoop();\n    }\n  };\n  \n  return (\n    <div className=\"flex flex-col h-screen\">\n      <nav className=\"p-4 flex gap-4\">\n        <Link to=\"/\" className=\"font-bold\">WEBCAM</Link>\n        <Link to=\"/image\">IMAGE</Link>\n      </nav>\n      \n      <div className=\"flex-1 relative\">\n        {/* ASCII output area */}\n      </div>\n      \n      <div className=\"p-4 flex justify-center gap-4\">\n        <button onClick={handleToggle}>\n          {isWebcamActive ? 'Stop Webcam' : 'Start Webcam'}\n        </button>\n      </div>\n      \n      {/* Hidden video element with ref callback */}\n      <video \n        ref={(el) => { if (el) useStore.getState().updateAppState({ videoRef: el }); }}\n        className=\"absolute bottom-4 right-4 w-32 h-24 -scale-x-100\" \n        autoPlay \n        playsInline \n        muted \n      />\n      \n      {webcamError && <div className=\"text-red-500\">{webcamError}</div>}\n    </div>\n  );\n}\n```\n\nUse ref callbacks to set videoRef, canvasRef, maskCanvasRef in store. NO useEffect.",
+        "testStrategy": "Click 'Start Webcam' button. Verify camera permission prompt appears. After granting, verify video preview appears in bottom-right corner. Click 'Stop Webcam' and verify preview disappears.",
+        "priority": "high",
+        "dependencies": [
+          "4",
+          "7",
+          "8"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.591Z"
+      },
+      {
+        "id": "10",
+        "title": "Create ASCII display component",
+        "description": "Build pre-formatted text display component for monochrome ASCII output with dynamic color styling",
+        "details": "Create `src/components/AsciiDisplay.tsx`:\n\n```tsx\nimport { useStore } from '../store';\n\nexport function AsciiDisplay() {\n  const { asciiOutput, coloredAsciiOutput, colorMode, asciiColor } = useStore();\n  \n  if (colorMode === 'monochrome') {\n    return (\n      <pre \n        className=\"font-mono text-xs leading-none whitespace-pre overflow-hidden\"\n        style={{ color: asciiColor }}\n      >\n        {asciiOutput}\n      </pre>\n    );\n  }\n  \n  if (colorMode === 'color') {\n    return (\n      <pre \n        className=\"font-mono text-xs leading-none whitespace-pre overflow-hidden\"\n        dangerouslySetInnerHTML={{ __html: coloredAsciiOutput }}\n      />\n    );\n  }\n  \n  return null; // emoji mode uses EmojiGrid component\n}\n```\n\nAdd to WebcamTab's output area. `line-height: 0.5em` for 2:1 aspect ratio.",
+        "testStrategy": "Start webcam and verify ASCII characters appear in the output area. Change asciiColor via store and verify text color updates. Verify characters are monospace and tightly packed.",
+        "priority": "high",
+        "dependencies": [
+          "6",
+          "9"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.592Z"
+      },
+      {
+        "id": "11",
+        "title": "Implement LAB color space brightness calculation",
+        "description": "Add perceptually uniform LAB L* computation with Gray World white balance and color temperature correction",
+        "details": "Update `updateAsciiOutput` in store:\n\n```ts\n// Per-cell average RGB with Gray World white balance\nfunction computeCellBrightness(imageData: ImageData, x: number, y: number, cellWidth: number, cellHeight: number): number {\n  const { data, width } = imageData;\n  let rSum = 0, gSum = 0, bSum = 0, count = 0;\n  \n  for (let dy = 0; dy < cellHeight; dy++) {\n    for (let dx = 0; dx < cellWidth; dx++) {\n      const px = (x * cellWidth + dx) + (y * cellHeight + dy) * width;\n      const i = px * 4;\n      rSum += data[i]; gSum += data[i+1]; bSum += data[i+2]; count++;\n    }\n  }\n  \n  // Gray World white balance\n  const avgR = rSum / count, avgG = gSum / count, avgB = bSum / count;\n  const grayAvg = (avgR + avgG + avgB) / 3;\n  const r = avgR * (grayAvg / (avgR + 0.001));\n  const g = avgG * (grayAvg / (avgG + 0.001));\n  const b = avgB * (grayAvg / (avgB + 0.001));\n  \n  // RGB to LAB L* (simplified D65 illuminant)\n  const X = 0.4124 * r + 0.3576 * g + 0.1805 * b;\n  const Y = 0.2126 * r + 0.7152 * g + 0.0722 * b;\n  const Z = 0.0193 * r + 0.1192 * g + 0.9505 * b;\n  \n  const Yn = 100; // D65 white point\n  const fy = Y / Yn > 0.008856 ? Math.pow(Y / Yn, 1/3) : (903.3 * Y / Yn + 16) / 116;\n  const L = 116 * fy - 16; // L* in [0, 100]\n  \n  return L;\n}\n```\n\nReplace placeholder brightness calc in updateAsciiOutput.",
+        "testStrategy": "Point webcam at a white surface and verify high L* values (near 100). Point at black surface and verify low L* values (near 0). Verify output uses full character range, not just extremes.",
+        "priority": "medium",
+        "dependencies": [
+          "6"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.594Z"
+      },
+      {
+        "id": "12",
+        "title": "Implement unsharp masking for edge sharpness",
+        "description": "Add 3×3 neighborhood convolution with k=0.5 sharpening kernel applied to LAB L* values",
+        "details": "After computing per-cell LAB L* brightness, apply unsharp mask:\n\n```ts\nfunction applyUnsharpMask(brightnessGrid: number[][], k: number = 0.5): number[][] {\n  const rows = brightnessGrid.length;\n  const cols = brightnessGrid[0].length;\n  const sharpened: number[][] = [];\n  \n  for (let y = 0; y < rows; y++) {\n    sharpened[y] = [];\n    for (let x = 0; x < cols; x++) {\n      if (y === 0 || y === rows - 1 || x === 0 || x === cols - 1) {\n        sharpened[y][x] = brightnessGrid[y][x]; // edge cells unchanged\n        continue;\n      }\n      \n      // 3×3 average (blurred)\n      let sum = 0;\n      for (let dy = -1; dy <= 1; dy++) {\n        for (let dx = -1; dx <= 1; dx++) {\n          sum += brightnessGrid[y + dy][x + dx];\n        }\n      }\n      const blurred = sum / 9;\n      \n      // Unsharp mask formula: original + k * (original - blurred)\n      const original = brightnessGrid[y][x];\n      sharpened[y][x] = original + k * (original - blurred);\n    }\n  }\n  \n  return sharpened;\n}\n```\n\nIntegrate into updateAsciiOutput after LAB L* computation.",
+        "testStrategy": "Compare output with and without unsharp mask. With unsharp mask, edges (hand against background) should show sharper character transitions. Verify no artifacts or overflow.",
+        "priority": "medium",
+        "dependencies": [
+          "11"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.595Z"
+      },
+      {
+        "id": "13",
+        "title": "Implement temporal smoothing on segmentation mask",
+        "description": "Blend current and previous mask with 0.7/0.3 ratio and gamma 0.8 to reduce flickering",
+        "details": "Update segmentation mask computation in `updateAsciiOutput`:\n\n```ts\nif (segmenter && maskCanvasRef) {\n  const maskCtx = maskCanvasRef.getContext('2d')!;\n  maskCanvasRef.width = vw; maskCanvasRef.height = vh;\n  \n  await new Promise<void>((resolve) => {\n    segmenter.onResults((results) => {\n      maskCtx.drawImage(results.segmentationMask, 0, 0);\n      resolve();\n    });\n    segmenter.send({ image: videoRef });\n  });\n  \n  const currentMask = maskCtx.getImageData(0, 0, vw, vh).data;\n  \n  if (previousMaskData) {\n    // Temporal smoothing: 0.7 * current + 0.3 * previous, gamma 0.8\n    for (let i = 0; i < currentMask.length; i += 4) {\n      const curr = currentMask[i] / 255;\n      const prev = previousMaskData[i] / 255;\n      const blended = 0.7 * curr + 0.3 * prev;\n      const gamma = Math.pow(blended, 0.8);\n      currentMask[i] = currentMask[i+1] = currentMask[i+2] = gamma * 255;\n    }\n  }\n  \n  maskData = new Uint8ClampedArray(currentMask);\n}\n```\n\nStore maskData in previousMaskData at end of updateAsciiOutput.",
+        "testStrategy": "Move hand rapidly in front of webcam. With temporal smoothing, mask should transition smoothly without flickering. Without smoothing, edges should appear jittery.",
+        "priority": "medium",
+        "dependencies": [
+          "5",
+          "6"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.596Z"
+      },
+      {
+        "id": "14",
+        "title": "Implement character set selection UI",
+        "description": "Add dropdown/buttons for MINIMAL, STANDARD, BLOCKS character sets that update store selectedCharset",
+        "details": "Add to WebcamTab controls section:\n\n```tsx\nconst { selectedCharset, updateAppState } = useStore();\n\n<div className=\"flex gap-2\">\n  {Object.keys(CHARACTER_SETS).map((key) => (\n    <button\n      key={key}\n      onClick={() => updateAppState({ selectedCharset: key as any })}\n      className={selectedCharset === key ? 'font-bold' : ''}\n    >\n      {CHARACTER_SETS[key as keyof typeof CHARACTER_SETS].name}\n    </button>\n  ))}\n</div>\n```\n\nNo useEffect needed — updateAppState triggers re-render, next frame uses new charset.",
+        "testStrategy": "Click each character set button. Verify ASCII output immediately switches to the new character set. Verify MINIMAL uses 10 chars, STANDARD uses ~65 chars, BLOCKS uses 5 chars.",
+        "priority": "medium",
+        "dependencies": [
+          "2",
+          "9"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.597Z"
+      },
+      {
+        "id": "15",
+        "title": "Implement performance metrics tracking",
+        "description": "Add fps, frame time, segmentation time, ASCII time, resolution, and grid size tracking to store",
+        "details": "Update render loop in `startRenderLoop`:\n\n```ts\nconst loop = (timestamp: number) => {\n  // ... existing frame skip logic ...\n  \n  const frameStart = performance.now();\n  \n  const segStart = performance.now();\n  // ... segmentation code ...\n  const segTime = performance.now() - segStart;\n  \n  const asciiStart = performance.now();\n  // ... ASCII conversion ...\n  const asciiTime = performance.now() - asciiStart;\n  \n  const frameTime = performance.now() - frameStart;\n  const fps = 1000 / (timestamp - lastFrameTime);\n  \n  set({ \n    perfMetrics: {\n      fps: Math.round(fps),\n      frameTimeMs: Math.round(frameTime),\n      segTimeMs: Math.round(segTime),\n      asciiTimeMs: Math.round(asciiTime),\n      resolution: `${vw}×${vh}`,\n      gridSize: `${asciiWidth}×${rows}`\n    }\n  });\n  \n  lastFrameTime = timestamp;\n  const id = requestAnimationFrame(loop);\n  set({ animationFrameId: id });\n};\n```",
+        "testStrategy": "Start webcam and verify perfMetrics object updates every frame. Verify fps is approximately 30. Verify frameTimeMs is under 33ms on modern hardware.",
+        "priority": "medium",
+        "dependencies": [
+          "7"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.598Z"
+      },
+      {
+        "id": "16",
+        "title": "Create performance overlay UI component",
+        "description": "Build overlay that displays perfMetrics with toggle button in top-right corner",
+        "details": "Create `src/components/PerfOverlay.tsx`:\n\n```tsx\nimport { useStore } from '../store';\n\nexport function PerfOverlay() {\n  const { perfMetrics, showPerfOverlay, updateAppState } = useStore();\n  \n  return (\n    <>\n      <button \n        onClick={() => updateAppState({ showPerfOverlay: !showPerfOverlay })}\n        className=\"absolute top-4 right-4 text-xs\"\n      >\n        {showPerfOverlay ? 'Hide' : 'Show'} Perf\n      </button>\n      \n      {showPerfOverlay && perfMetrics && (\n        <div className=\"absolute top-12 right-4 bg-black/80 text-white p-2 text-xs font-mono\">\n          <div>FPS: {perfMetrics.fps}</div>\n          <div>Frame: {perfMetrics.frameTimeMs}ms</div>\n          <div>Seg: {perfMetrics.segTimeMs}ms</div>\n          <div>ASCII: {perfMetrics.asciiTimeMs}ms</div>\n          <div>Res: {perfMetrics.resolution}</div>\n          <div>Grid: {perfMetrics.gridSize}</div>\n        </div>\n      )}\n    </>\n  );\n}\n```\n\nAdd to WebcamTab.",
+        "testStrategy": "Click 'Show Perf' button and verify overlay appears with live metrics. Verify all 6 metrics are displayed and update in real-time. Click 'Hide Perf' and verify overlay disappears.",
+        "priority": "low",
+        "dependencies": [
+          "15"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.599Z"
+      },
+      {
+        "id": "17",
+        "title": "Implement monochrome color picker UI",
+        "description": "Add 7 preset color swatches and HexColorPicker (react-colorful) for custom colors",
+        "details": "Create `src/components/ColorPicker.tsx`:\n\n```tsx\nimport { HexColorPicker } from 'react-colorful';\nimport { useStore } from '../store';\n\nconst PRESETS = ['#00ff00', '#ff0000', '#0000ff', '#ffff00', '#ff00ff', '#00ffff', '#ffffff'];\n\nexport function ColorPicker() {\n  const { asciiColor, updateAppState, colorMode } = useStore();\n  if (colorMode !== 'monochrome') return null;\n  \n  return (\n    <div className=\"flex flex-col gap-2\">\n      <div className=\"flex gap-1\">\n        {PRESETS.map(color => (\n          <button\n            key={color}\n            onClick={() => updateAppState({ asciiColor: color })}\n            className=\"w-8 h-8 rounded border-2\"\n            style={{ \n              backgroundColor: color, \n              borderColor: asciiColor === color ? '#fff' : '#000' \n            }}\n          />\n        ))}\n      </div>\n      <HexColorPicker color={asciiColor} onChange={(color) => updateAppState({ asciiColor: color })} />\n    </div>\n  );\n}\n```\n\nAdd to WebcamTab controls.",
+        "testStrategy": "Click a preset swatch and verify ASCII output color changes immediately. Use the hex picker to select a custom color and verify ASCII output updates. Verify picker hides when switching to color or emoji mode.",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "10"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.600Z"
+      },
+      {
+        "id": "18",
+        "title": "Implement rendering mode selector UI",
+        "description": "Add monochrome/color/emoji mode toggle buttons that update store colorMode",
+        "details": "Add to WebcamTab controls section:\n\n```tsx\nconst { colorMode, updateAppState } = useStore();\n\nconst modes: Array<'monochrome' | 'color' | 'emoji'> = ['monochrome', 'color', 'emoji'];\n\n<div className=\"flex gap-2\">\n  {modes.map(mode => (\n    <button\n      key={mode}\n      onClick={() => updateAppState({ colorMode: mode })}\n      className={colorMode === mode ? 'font-bold underline' : ''}\n    >\n      {mode.toUpperCase()}\n    </button>\n  ))}\n</div>\n```\n\nNo useEffect — render loop checks colorMode and calls the appropriate conversion function.",
+        "testStrategy": "Click each mode button. Verify colorMode state updates. Verify render loop calls correct conversion function (updateAsciiOutput / updateColorAsciiOutput / updateEmojiOutput).",
+        "priority": "medium",
+        "dependencies": [
+          "3",
+          "9"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.601Z"
+      },
+      {
+        "id": "19",
+        "title": "Implement color ASCII conversion (updateColorAsciiOutput)",
+        "description": "Add per-character RGB coloring with gamma lift, saturation boost, and HTML span output",
+        "details": "Add to store actions:\n\n```ts\nupdateColorAsciiOutput: () => {\n  const { canvasRef, videoRef, asciiWidth, selectedCharset } = get();\n  if (!canvasRef || !videoRef) return;\n  \n  const ctx = canvasRef.getContext('2d')!;\n  const vw = videoRef.videoWidth, vh = videoRef.videoHeight;\n  canvasRef.width = vw; canvasRef.height = vh;\n  ctx.drawImage(videoRef, 0, 0);\n  \n  const imageData = ctx.getImageData(0, 0, vw, vh);\n  const cellWidth = Math.floor(vw / asciiWidth);\n  const cellHeight = cellWidth * 2;\n  const rows = Math.floor(vh / cellHeight);\n  const chars = CHARACTER_SETS[selectedCharset].chars;\n  \n  let output = '';\n  \n  for (let y = 0; y < rows; y++) {\n    for (let x = 0; x < asciiWidth; x++) {\n      // Compute per-cell average RGB + LAB L* brightness\n      const { r, g, b, L } = computeCellColorAndBrightness(imageData, x, y, cellWidth, cellHeight);\n      \n      // Unsharp mask on brightness (k=0.5) and color (k=0.8)\n      // ... (simplified here, full implementation needed)\n      \n      // Gamma lift (0.55) + saturation boost (1.5x) via HSL\n      const [h, s, l] = rgbToHsl(r, g, b);\n      const boostedS = Math.min(s * 1.5, 1);\n      const liftedL = Math.pow(l, 0.55);\n      const [rFinal, gFinal, bFinal] = hslToRgb(h, boostedS, liftedL);\n      \n      const charIndex = Math.floor((L / 100) * (chars.length - 1));\n      const hex = `#${((1 << 24) + (rFinal << 16) + (gFinal << 8) + bFinal).toString(16).slice(1)}`;\n      output += `<span style=\"color:${hex}\">${chars[charIndex]}</span>`;\n    }\n    output += '\\n';\n  }\n  \n  set({ coloredAsciiOutput: output });\n},\n```\n\nInclude helper functions for RGB↔HSL conversion.",
+        "testStrategy": "Switch to color mode and verify each ASCII character has inline color styling. Point webcam at colorful objects (red, blue, green) and verify colors appear in output. Verify saturation is vibrant.",
+        "priority": "high",
+        "dependencies": [
+          "2",
+          "11"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.602Z"
+      },
+      {
+        "id": "20",
+        "title": "Implement emoji ASCII conversion (updateEmojiOutput)",
+        "description": "Add square cell processing with Gray World white balance and nearest-emoji RGB matching",
+        "details": "Add to store actions:\n\n```ts\nupdateEmojiOutput: () => {\n  const { canvasRef, videoRef, asciiWidth } = get();\n  if (!canvasRef || !videoRef) return;\n  \n  const ctx = canvasRef.getContext('2d')!;\n  const vw = videoRef.videoWidth, vh = videoRef.videoHeight;\n  canvasRef.width = vw; canvasRef.height = vh;\n  ctx.drawImage(videoRef, 0, 0);\n  \n  const imageData = ctx.getImageData(0, 0, vw, vh);\n  \n  // Square cells (1:1 aspect ratio)\n  const cellSize = Math.floor(vw / asciiWidth);\n  const rows = Math.floor(vh / cellSize);\n  \n  // Gray World white balance per frame\n  const { data } = imageData;\n  let rSum = 0, gSum = 0, bSum = 0;\n  for (let i = 0; i < data.length; i += 4) {\n    rSum += data[i]; gSum += data[i+1]; bSum += data[i+2];\n  }\n  const grayAvg = (rSum + gSum + bSum) / (data.length / 4 * 3);\n  const rScale = grayAvg / (rSum / (data.length / 4));\n  const gScale = grayAvg / (gSum / (data.length / 4));\n  const bScale = grayAvg / (bSum / (data.length / 4));\n  \n  const rowsOutput: string[] = [];\n  \n  for (let y = 0; y < rows; y++) {\n    let rowStr = '';\n    for (let x = 0; x < asciiWidth; x++) {\n      // Compute per-cell average RGB\n      let r = 0, g = 0, b = 0, count = 0;\n      for (let dy = 0; dy < cellSize; dy++) {\n        for (let dx = 0; dx < cellSize; dx++) {\n          const px = (x * cellSize + dx) + (y * cellSize + dy) * vw;\n          const i = px * 4;\n          r += data[i] * rScale; g += data[i+1] * gScale; b += data[i+2] * bScale; count++;\n        }\n      }\n      r /= count; g /= count; b /= count;\n      \n      rowStr += rgbToNearestEmoji(r, g, b);\n    }\n    rowsOutput.push(rowStr);\n  }\n  \n  set({ emojiOutput: { cols: asciiWidth, rows: rowsOutput } });\n},\n```",
+        "testStrategy": "Switch to emoji mode. Verify output uses only emojis from EMOJI_COLOR_PALETTE. Point webcam at red object and verify red emojis (🔴❤️) appear. Verify cells are square, not 2:1.",
+        "priority": "high",
+        "dependencies": [
+          "2",
+          "11"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.603Z"
+      },
+      {
+        "id": "21",
+        "title": "Create EmojiGrid rendering component",
+        "description": "Build grid component that renders emoji output with proper spacing and square aspect ratio",
+        "details": "Create `src/EmojiGrid.tsx`:\n\n```tsx\nimport { useStore } from './store';\n\nexport function EmojiGrid() {\n  const { emojiOutput } = useStore();\n  \n  return (\n    <div className=\"font-sans text-xl leading-none\" style={{ letterSpacing: '0' }}>\n      {emojiOutput.rows.map((row, i) => (\n        <div key={i} className=\"whitespace-nowrap\">\n          {[...row].map((emoji, j) => (\n            <span key={j}>{emoji}</span>\n          ))}\n        </div>\n      ))}\n    </div>\n  );\n}\n```\n\nUse `[...row]` to properly handle multi-codepoint emojis. Update AsciiDisplay to conditionally render EmojiGrid when colorMode === 'emoji'.",
+        "testStrategy": "Switch to emoji mode and verify EmojiGrid renders. Verify emojis are square and evenly spaced. Verify no visual gaps or overlaps between cells. Test with different viewport sizes.",
+        "priority": "high",
+        "dependencies": [
+          "20"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.604Z"
+      },
+      {
+        "id": "22",
+        "title": "Hide character set selector in emoji mode",
+        "description": "Conditionally render character set picker only when colorMode is monochrome or color",
+        "details": "Update character set selector in WebcamTab:\n\n```tsx\nconst { selectedCharset, colorMode, updateAppState } = useStore();\n\nif (colorMode !== 'emoji') {\n  return (\n    <div className=\"flex gap-2\">\n      {Object.keys(CHARACTER_SETS).map((key) => (\n        <button\n          key={key}\n          onClick={() => updateAppState({ selectedCharset: key as any })}\n          className={selectedCharset === key ? 'font-bold' : ''}\n        >\n          {CHARACTER_SETS[key as keyof typeof CHARACTER_SETS].name}\n        </button>\n      ))}\n    </div>\n  );\n}\nreturn null;\n```",
+        "testStrategy": "Switch to emoji mode and verify character set selector disappears. Switch back to monochrome or color and verify it reappears. Verify no console errors.",
+        "priority": "low",
+        "dependencies": [
+          "14",
+          "18"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.605Z"
+      },
+      {
+        "id": "23",
+        "title": "Implement image upload UI with drag-and-drop",
+        "description": "Build file input and drop zone on /image route that sets uploadedImage in store",
+        "details": "Update `src/routes/image.tsx`:\n\n```tsx\nimport { useStore } from '../store';\nimport { useState } from 'react';\n\nfunction ImageTab() {\n  const { uploadedImage, updateAppState } = useStore();\n  const [isDragging, setIsDragging] = useState(false);\n  \n  const handleFile = (file: File) => {\n    if (!file.type.startsWith('image/')) return;\n    \n    const reader = new FileReader();\n    reader.onload = (e) => {\n      updateAppState({ uploadedImage: e.target?.result as string });\n    };\n    reader.readAsDataURL(file);\n  };\n  \n  const handleDrop = (e: React.DragEvent) => {\n    e.preventDefault();\n    setIsDragging(false);\n    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);\n  };\n  \n  return (\n    <div className=\"flex flex-col h-screen\">\n      <nav className=\"p-4 flex gap-4\">\n        <Link to=\"/\">WEBCAM</Link>\n        <Link to=\"/image\" className=\"font-bold\">IMAGE</Link>\n      </nav>\n      \n      <div \n        className={`flex-1 flex items-center justify-center border-4 border-dashed ${isDragging ? 'border-blue-500' : 'border-gray-300'}`}\n        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}\n        onDragLeave={() => setIsDragging(false)}\n        onDrop={handleDrop}\n      >\n        {uploadedImage ? (\n          <div>Image loaded</div>\n        ) : (\n          <label className=\"cursor-pointer\">\n            Drop image or click to upload\n            <input type=\"file\" accept=\"image/*\" className=\"hidden\" onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />\n          </label>\n        )}\n      </div>\n    </div>\n  );\n}\n```",
+        "testStrategy": "Navigate to /image. Drag and drop a JPG file and verify uploadedImage state is set. Click 'click to upload' and select a PNG via file picker. Verify base64 data URL is stored.",
+        "priority": "high",
+        "dependencies": [
+          "8"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.606Z"
+      },
+      {
+        "id": "24",
+        "title": "Implement webcam frame capture for image tab",
+        "description": "Add button on /image route that captures current webcam frame and sets it as uploadedImage",
+        "details": "Add to ImageTab:\n\n```tsx\nconst { videoRef, canvasRef, updateAppState } = useStore();\n\nconst captureFrame = () => {\n  if (!videoRef || !canvasRef) return;\n  \n  const ctx = canvasRef.getContext('2d')!;\n  canvasRef.width = videoRef.videoWidth;\n  canvasRef.height = videoRef.videoHeight;\n  ctx.drawImage(videoRef, 0, 0);\n  \n  const dataUrl = canvasRef.toDataURL('image/png');\n  updateAppState({ uploadedImage: dataUrl });\n};\n\n<button onClick={captureFrame} disabled={!videoRef}>\n  📷 Capture from Webcam\n</button>\n```\n\nWebcam must be started from /webcam tab first. Show disabled state if videoRef is null.",
+        "testStrategy": "Start webcam on /webcam tab. Navigate to /image tab. Click 'Capture from Webcam' and verify uploadedImage is set to current frame. Verify button is disabled if webcam is not running.",
+        "priority": "medium",
+        "dependencies": [
+          "4",
+          "23"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.607Z"
+      },
+      {
+        "id": "25",
+        "title": "Implement static image ASCII conversion",
+        "description": "Add convertStaticImage action that processes uploadedImage through current colorMode pipeline",
+        "details": "Add to store actions:\n\n```ts\nconvertStaticImage: () => {\n  const { uploadedImage, canvasRef, colorMode } = get();\n  if (!uploadedImage || !canvasRef) return;\n  \n  const img = new Image();\n  img.onload = () => {\n    const ctx = canvasRef.getContext('2d')!;\n    canvasRef.width = img.width;\n    canvasRef.height = img.height;\n    ctx.drawImage(img, 0, 0);\n    \n    // Reuse existing conversion logic\n    if (colorMode === 'monochrome') {\n      // Call same logic as updateAsciiOutput but without segmentation\n      get().updateAsciiOutput();\n    } else if (colorMode === 'color') {\n      get().updateColorAsciiOutput();\n    } else if (colorMode === 'emoji') {\n      get().updateEmojiOutput();\n    }\n  };\n  img.src = uploadedImage;\n},\n```\n\nModify updateAsciiOutput to skip segmentation when not in webcam mode. Call convertStaticImage whenever uploadedImage changes or colorMode changes.",
+        "testStrategy": "Upload an image on /image tab. Verify ASCII output appears. Switch rendering modes and verify output updates. Upload a different image and verify new output.",
+        "priority": "high",
+        "dependencies": [
+          "6",
+          "19",
+          "20",
+          "23"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.608Z"
+      },
+      {
+        "id": "26",
+        "title": "Add re-process button for mode switching on static images",
+        "description": "Add button on /image route that calls convertStaticImage to regenerate output after mode change",
+        "details": "Add to ImageTab:\n\n```tsx\nconst { uploadedImage, convertStaticImage } = useStore();\n\n{uploadedImage && (\n  <div className=\"p-4 flex justify-center gap-4\">\n    <button onClick={() => useStore.getState().convertStaticImage()}>\n      🔄 Re-process\n    </button>\n  </div>\n)}\n```\n\nAlso call convertStaticImage automatically when uploadedImage is first set. User clicks re-process after switching modes.",
+        "testStrategy": "Upload image, verify output appears. Switch from monochrome to color mode. Click 'Re-process' and verify output regenerates with new mode. Verify button only appears when image is loaded.",
+        "priority": "medium",
+        "dependencies": [
+          "25"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.609Z"
+      },
+      {
+        "id": "27",
+        "title": "Implement screenshot export with off-screen canvas",
+        "description": "Add takeScreenshot action that renders current output to 3× resolution PNG",
+        "details": "Add to store actions:\n\n```ts\ntakeScreenshot: () => {\n  const { colorMode, asciiOutput, coloredAsciiOutput, emojiOutput, asciiColor, selectedCharset } = get();\n  \n  const canvas = document.createElement('canvas');\n  const scale = 3;\n  const fontSize = 12 * scale;\n  const lineHeight = 6 * scale; // 2:1 aspect ratio for ASCII\n  \n  if (colorMode === 'monochrome') {\n    const lines = asciiOutput.split('\\n');\n    const width = lines[0].length * fontSize * 0.6; // monospace char width ~0.6em\n    const height = lines.length * lineHeight;\n    canvas.width = width; canvas.height = height;\n    \n    const ctx = canvas.getContext('2d')!;\n    ctx.fillStyle = '#000';\n    ctx.fillRect(0, 0, width, height);\n    ctx.fillStyle = asciiColor;\n    ctx.font = `${fontSize}px monospace`;\n    \n    lines.forEach((line, i) => {\n      ctx.fillText(line, 0, (i + 1) * lineHeight);\n    });\n  } else if (colorMode === 'color') {\n    // Parse coloredAsciiOutput HTML and render each <span> with its color\n    const lines = coloredAsciiOutput.split('\\n');\n    const width = lines[0].replace(/<[^>]*>/g, '').length * fontSize * 0.6;\n    const height = lines.length * lineHeight;\n    canvas.width = width; canvas.height = height;\n    \n    const ctx = canvas.getContext('2d')!;\n    ctx.fillStyle = '#000';\n    ctx.fillRect(0, 0, width, height);\n    ctx.font = `${fontSize}px monospace`;\n    \n    lines.forEach((line, y) => {\n      const regex = /<span style=\"color:(#[0-9a-f]{6})\">(.)<\\/span>/g;\n      let match, x = 0;\n      while ((match = regex.exec(line)) !== null) {\n        ctx.fillStyle = match[1];\n        ctx.fillText(match[2], x * fontSize * 0.6, (y + 1) * lineHeight);\n        x++;\n      }\n    });\n  } else if (colorMode === 'emoji') {\n    const EMOJI_SIZE = 24 * scale;\n    canvas.width = emojiOutput.cols * EMOJI_SIZE;\n    canvas.height = emojiOutput.rows.length * EMOJI_SIZE;\n    \n    const ctx = canvas.getContext('2d')!;\n    ctx.fillStyle = '#000';\n    ctx.fillRect(0, 0, canvas.width, canvas.height);\n    ctx.font = `${EMOJI_SIZE * 0.9}px serif`;\n    \n    emojiOutput.rows.forEach((row, y) => {\n      [...row].forEach((emoji, x) => {\n        ctx.fillText(emoji, x * EMOJI_SIZE, (y + 1) * EMOJI_SIZE);\n      });\n    });\n  }\n  \n  canvas.toBlob((blob) => {\n    if (!blob) return;\n    \n    // Web Share API or download link\n    if (navigator.share && navigator.canShare({ files: [new File([blob], 'ascii.png', { type: 'image/png' })] })) {\n      navigator.share({ files: [new File([blob], 'ascii.png', { type: 'image/png' })] });\n    } else {\n      const url = URL.createObjectURL(blob);\n      const a = document.createElement('a');\n      a.href = url;\n      a.download = 'ascii.png';\n      a.click();\n      URL.revokeObjectURL(url);\n    }\n  });\n},\n```",
+        "testStrategy": "Click screenshot button in monochrome mode. Verify PNG downloads with correct colors. Test in color mode and verify each character has correct color. Test in emoji mode and verify emojis render correctly. On mobile, verify Web Share API is used.",
+        "priority": "high",
+        "dependencies": [
+          "10",
+          "21"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.610Z"
+      },
+      {
+        "id": "28",
+        "title": "Add screenshot button UI with conditional visibility",
+        "description": "Add 📷 button that calls takeScreenshot, only visible when output exists",
+        "details": "Add to both WebcamTab and ImageTab:\n\n```tsx\nconst { asciiOutput, coloredAsciiOutput, emojiOutput, colorMode, takeScreenshot } = useStore();\n\nconst hasOutput = colorMode === 'monochrome' ? asciiOutput.length > 0\n  : colorMode === 'color' ? coloredAsciiOutput.length > 0\n  : emojiOutput.rows.length > 0;\n\n{hasOutput && (\n  <button onClick={() => useStore.getState().takeScreenshot()}>\n    📷 Screenshot\n  </button>\n)}\n```\n\nButton appears in controls section, only when there is output to export.",
+        "testStrategy": "Start webcam. Verify screenshot button appears. Stop webcam. Verify button disappears. Upload image and verify button appears. Verify button works on both tabs.",
+        "priority": "medium",
+        "dependencies": [
+          "27"
+        ],
+        "status": "done",
+        "subtasks": [],
+        "updatedAt": "2026-03-22T20:45:01.611Z"
+      },
+      {
+        "id": "29",
+        "title": "Add cross-browser testing for rendering modes",
+        "description": "Verify all three rendering modes work correctly in Chrome, Firefox, Safari (desktop + mobile)",
+        "details": "Test matrix:\n\n**Desktop:**\n- Chrome (latest): monochrome, color, emoji modes\n- Firefox (latest): monochrome, color, emoji modes\n- Safari (latest): monochrome, color, emoji modes\n\n**Mobile:**\n- Chrome Android: all modes, responsive layout\n- Safari iOS: all modes, responsive layout\n\n**Specific checks:**\n- Emoji rendering consistency: verify emojis from EMOJI_COLOR_PALETTE appear similar across platforms\n- Color mode HTML rendering: verify inline styles work in all browsers\n- Canvas APIs: verify getUserMedia, Canvas 2D, MediaPipe WASM load correctly\n- Responsive layout: verify ASCII width auto-scales, portrait mode detection works\n\n**Known issues:**\n- Safari < 16.4: no OffscreenCanvas support (not blocking for Phase 3)\n- Firefox: emoji rendering may differ from Chromium/WebKit\n\nDocument any browser-specific quirks in `docs/infra/decisions.md`.",
+        "testStrategy": "Open app in each browser. Start webcam and cycle through all three modes. Verify output appears correctly. Take screenshots in each mode and verify export works. Test on mobile devices for responsive layout.",
+        "priority": "medium",
+        "dependencies": [
+          "10",
+          "19",
+          "21"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "30",
+        "title": "Implement Web Worker scaffold with message protocol",
+        "description": "Create worker file, establish postMessage protocol for transferable ImageData, set up bidirectional communication",
+        "details": "Create `src/worker/ascii-worker.ts`:\n\n```ts\ninterface WorkerInput {\n  type: 'process';\n  imageData: ImageData;\n  config: {\n    asciiWidth: number;\n    selectedCharset: 'MINIMAL' | 'STANDARD' | 'BLOCKS';\n    colorMode: 'monochrome' | 'color' | 'emoji';\n    asciiColor: string;\n  };\n}\n\ninterface WorkerOutput {\n  type: 'result';\n  asciiOutput?: string;\n  coloredAsciiOutput?: string;\n  emojiOutput?: { cols: number; rows: string[] };\n}\n\nself.onmessage = (e: MessageEvent<WorkerInput>) => {\n  const { type, imageData, config } = e.data;\n  \n  if (type === 'process') {\n    // Call conversion logic (to be moved from store)\n    const result: WorkerOutput = { type: 'result' };\n    \n    if (config.colorMode === 'monochrome') {\n      result.asciiOutput = processMonochrome(imageData, config);\n    } else if (config.colorMode === 'color') {\n      result.coloredAsciiOutput = processColor(imageData, config);\n    } else if (config.colorMode === 'emoji') {\n      result.emojiOutput = processEmoji(imageData, config);\n    }\n    \n    self.postMessage(result);\n  }\n};\n```\n\nUpdate Vite config to handle worker imports. Add worker instance to store state.",
+        "testStrategy": "Create worker instance in store. Send test ImageData via postMessage with transferable. Verify worker receives message. Verify main thread receives result. Verify ImageData is transferred (not copied).",
+        "priority": "high",
+        "dependencies": [
+          "7"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "31",
+        "title": "Move monochrome ASCII conversion to Web Worker",
+        "description": "Refactor updateAsciiOutput to send ImageData to worker and receive plain text result",
+        "details": "1. Move all monochrome processing logic (LAB L*, unsharp mask, character mapping) from `updateAsciiOutput` in store to `processMonochrome` in worker.\n\n2. Update store `updateAsciiOutput`:\n```ts\nupdateAsciiOutput: () => {\n  const { canvasRef, videoRef, worker, asciiWidth, selectedCharset, asciiColor } = get();\n  if (!canvasRef || !videoRef || !worker) return;\n  \n  const ctx = canvasRef.getContext('2d')!;\n  const vw = videoRef.videoWidth, vh = videoRef.videoHeight;\n  canvasRef.width = vw; canvasRef.height = vh;\n  ctx.drawImage(videoRef, 0, 0);\n  \n  const imageData = ctx.getImageData(0, 0, vw, vh);\n  \n  worker.postMessage(\n    { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'monochrome', asciiColor } },\n    [imageData.data.buffer] // transfer ownership\n  );\n},\n```\n\n3. Add worker.onmessage handler in store to update asciiOutput when result arrives.\n\n4. Implement single-slot mailbox pattern: if worker is busy, drop frame instead of queueing.",
+        "testStrategy": "Start webcam in monochrome mode. Verify ASCII output still appears. Verify frame rate remains ~30fps. Verify main thread performance improves (check Chrome DevTools Performance tab).",
+        "priority": "high",
+        "dependencies": [
+          "30",
+          "6",
+          "11",
+          "12"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "32",
+        "title": "Move color ASCII conversion to Web Worker",
+        "description": "Refactor updateColorAsciiOutput to process in worker with gamma lift and saturation boost",
+        "details": "Move all color processing logic (RGB averaging, LAB L*, unsharp mask on color channels, HSL saturation boost, gamma lift, HTML span generation) from `updateColorAsciiOutput` in store to `processColor` in worker.\n\nUpdate store action to send ImageData to worker and receive coloredAsciiOutput HTML string.\n\nReuse same postMessage protocol and single-slot mailbox pattern as monochrome mode.",
+        "testStrategy": "Switch to color mode. Verify colored HTML output still appears. Verify each character has correct inline color styling. Verify frame rate remains ~30fps.",
+        "priority": "high",
+        "dependencies": [
+          "30",
+          "19"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "33",
+        "title": "Move emoji ASCII conversion to Web Worker",
+        "description": "Refactor updateEmojiOutput to process in worker with Gray World white balance and nearest-emoji matching",
+        "details": "Move all emoji processing logic (Gray World white balance, per-cell RGB averaging, rgbToNearestEmoji) from `updateEmojiOutput` in store to `processEmoji` in worker.\n\nImport CHARACTER_SETS and EMOJI_COLOR_PALETTE constants into worker scope.\n\nUpdate store action to send ImageData to worker and receive emojiOutput object { cols, rows }.\n\nReuse same postMessage protocol and single-slot mailbox pattern.",
+        "testStrategy": "Switch to emoji mode. Verify emoji output still appears. Verify emojis match colors correctly. Verify frame rate remains ~30fps. Verify no main thread jank.",
+        "priority": "high",
+        "dependencies": [
+          "30",
+          "20"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "34",
+        "title": "Implement WebGL brightness shader",
+        "description": "Create fragment shader for per-pixel LAB L* calculation, integrate into worker as optional fast path",
+        "details": "Create WebGL2 context in worker (OffscreenCanvas if available, fall back to CPU).\n\nFragment shader (GLSL ES 3.0):\n```glsl\n#version 300 es\nprecision highp float;\n\nin vec2 vTexCoord;\nout vec4 fragColor;\nuniform sampler2D uTexture;\n\nvec3 rgb2lab(vec3 rgb) {\n  // RGB to XYZ (D65)\n  float x = 0.4124 * rgb.r + 0.3576 * rgb.g + 0.1805 * rgb.b;\n  float y = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;\n  float z = 0.0193 * rgb.r + 0.1192 * rgb.g + 0.9505 * rgb.b;\n  \n  // XYZ to LAB\n  float fy = (y / 100.0 > 0.008856) ? pow(y / 100.0, 1.0/3.0) : (903.3 * y / 100.0 + 16.0) / 116.0;\n  float L = 116.0 * fy - 16.0;\n  \n  return vec3(L, 0.0, 0.0);\n}\n\nvoid main() {\n  vec4 color = texture(uTexture, vTexCoord);\n  vec3 lab = rgb2lab(color.rgb);\n  fragColor = vec4(lab.x / 100.0, lab.x / 100.0, lab.x / 100.0, 1.0); // L* normalized to [0,1]\n}\n```\n\nRender texture to framebuffer, read pixels back, use brightness values for character mapping.\n\nFeature-detect OffscreenCanvas + WebGL2. If unavailable (Safari < 16.4), fall back to CPU LAB calculation.\n\nTarget: 10-100× speedup vs CPU LAB conversion.",
+        "testStrategy": "Enable WebGL path. Verify monochrome output matches CPU version. Measure performance: WebGL should be 10-100× faster than CPU for LAB calculation. Verify graceful fallback on Safari < 16.4.",
+        "priority": "medium",
+        "dependencies": [
+          "31"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "35",
+        "title": "Implement edge detection with directional characters",
+        "description": "Calculate edge direction per cell using Sobel operator, select nearest directional character (|, /, \\, —)",
+        "details": "Add to worker processing:\n\n1. After computing per-cell brightness, apply 3×3 Sobel operator to detect edges:\n```ts\nconst sobelX = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]];\nconst sobelY = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]];\n\nfunction computeEdgeDirection(brightnessGrid: number[][], x: number, y: number): number {\n  let gx = 0, gy = 0;\n  for (let dy = -1; dy <= 1; dy++) {\n    for (let dx = -1; dx <= 1; dx++) {\n      const b = brightnessGrid[y + dy]?.[x + dx] ?? 0;\n      gx += b * sobelX[dy + 1][dx + 1];\n      gy += b * sobelY[dy + 1][dx + 1];\n    }\n  }\n  return Math.atan2(gy, gx); // angle in radians\n}\n```\n\n2. Map angle to directional character set:\n```ts\nconst DIRECTIONAL_CHARS = {\n  HORIZONTAL: '—',  // 0° or 180°\n  VERTICAL: '|',    // 90° or 270°\n  DIAGONAL_UP: '/',  // 45°\n  DIAGONAL_DOWN: '\\\\' // 135°\n};\n```\n\n3. Select character based on edge magnitude (use directional char if edge is strong, else use brightness-based char).\n\nOptional: make this a configurable mode (\"edge-aware\" character set).",
+        "testStrategy": "Enable edge detection mode. Point webcam at objects with strong edges (book, phone). Verify directional characters (|, /, \\, —) appear along edges. Verify flat areas use brightness-based characters.",
+        "priority": "low",
+        "dependencies": [
+          "31",
+          "34"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "36",
+        "title": "Decouple pipeline into independent stages",
+        "description": "Split render loop into video capture, segmentation, and ASCII conversion stages with independent queues",
+        "details": "Refactor render loop into three independent async stages:\n\n**Stage 1: Video Capture**\n- Runs at camera FPS (30fps)\n- Draws video frame to canvas\n- Pushes ImageData to segmentation queue (if enabled) or directly to ASCII queue\n\n**Stage 2: Segmentation** (optional, monochrome mode only)\n- Runs at MediaPipe throughput (~20fps on mid-range hardware)\n- Pulls from segmentation queue (single-slot, drops frames if busy)\n- Applies segmentation mask with temporal smoothing\n- Pushes masked ImageData to ASCII queue\n\n**Stage 3: ASCII Conversion** (in worker)\n- Runs at worker throughput (~30fps with worker, potentially higher with WebGL)\n- Pulls from ASCII queue (single-slot mailbox)\n- Sends ImageData to worker\n- Receives result and updates store\n\nEach stage runs independently. If a stage is slow, it drops frames instead of blocking upstream stages.\n\nImplement using three separate `requestAnimationFrame` loops (or two rAF + one worker loop).\n\nTarget: smooth 30fps even when segmentation or ASCII conversion drops frames.",
+        "testStrategy": "Enable all three stages. Verify video preview stays smooth at 30fps even if ASCII output updates slower. Artificially throttle worker and verify video capture continues smoothly. Measure stage throughput independently.",
+        "priority": "medium",
+        "dependencies": [
+          "31",
+          "32",
+          "33"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "37",
+        "title": "Implement tile-based incremental processing",
+        "description": "Divide frame into tiles, only reprocess tiles where pixel diff exceeds threshold",
+        "details": "Add to worker processing:\n\n1. Divide frame into N×M tiles (e.g., 8×6 tiles for 640×480 frame).\n\n2. For each tile, compute pixel difference from previous frame:\n```ts\nfunction computeTileDiff(currentData: Uint8ClampedArray, previousData: Uint8ClampedArray, tileX: number, tileY: number, tileWidth: number, tileHeight: number, frameWidth: number): number {\n  let diff = 0, count = 0;\n  for (let y = 0; y < tileHeight; y++) {\n    for (let x = 0; x < tileWidth; x++) {\n      const px = (tileX * tileWidth + x) + (tileY * tileHeight + y) * frameWidth;\n      const i = px * 4;\n      diff += Math.abs(currentData[i] - previousData[i]) + Math.abs(currentData[i+1] - previousData[i+1]) + Math.abs(currentData[i+2] - previousData[i+2]);\n      count++;\n    }\n  }\n  return diff / count;\n}\n```\n\n3. Only reprocess tiles where diff > threshold (e.g., 10).\n\n4. For unchanged tiles, reuse previous ASCII output.\n\n5. Store per-tile output cache in worker.\n\nTarget: 60-80% CPU reduction for static or low-motion scenes. Zero benefit for high-motion scenes (all tiles exceed threshold).",
+        "testStrategy": "Enable tile-based processing. Hold webcam still and verify CPU usage drops significantly (60-80% reduction). Move hand slowly and verify only affected tiles update. Measure frame processing time with and without tile optimization.",
+        "priority": "medium",
+        "dependencies": [
+          "36"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "38",
+        "title": "Add performance mode toggle UI",
+        "description": "Add settings panel to enable/disable worker, WebGL, tile-based processing for comparison",
+        "details": "Create `src/components/PerformanceSettings.tsx`:\n\n```tsx\nimport { useStore } from '../store';\n\nexport function PerformanceSettings() {\n  const { useWorker, useWebGL, useTileOptimization, updateAppState } = useStore();\n  \n  return (\n    <div className=\"absolute top-4 left-4 bg-black/80 text-white p-2 text-xs\">\n      <h3 className=\"font-bold mb-2\">Performance</h3>\n      <label className=\"flex items-center gap-2\">\n        <input type=\"checkbox\" checked={useWorker} onChange={(e) => updateAppState({ useWorker: e.target.checked })} />\n        Web Worker\n      </label>\n      <label className=\"flex items-center gap-2\">\n        <input type=\"checkbox\" checked={useWebGL} onChange={(e) => updateAppState({ useWebGL: e.target.checked })} disabled={!useWorker} />\n        WebGL Shaders\n      </label>\n      <label className=\"flex items-center gap-2\">\n        <input type=\"checkbox\" checked={useTileOptimization} onChange={(e) => updateAppState({ useTileOptimization: e.target.checked })} disabled={!useWorker} />\n        Tile Optimization\n      </label>\n    </div>\n  );\n}\n```\n\nAdd state fields to store. Update worker to respect these flags. Show comparison metrics in perf overlay (CPU vs GPU time, tiles processed vs skipped).",
+        "testStrategy": "Toggle each setting and verify it affects processing path. Disable worker and verify fallback to main thread CPU path. Enable WebGL and verify shader path is used. Enable tile optimization and verify CPU reduction in static scenes.",
+        "priority": "low",
+        "dependencies": [
+          "31",
+          "34",
+          "37"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "39",
+        "title": "Optimize bundle size and implement code splitting",
+        "description": "Lazy load MediaPipe WASM, worker, and react-colorful only when needed",
+        "details": "1. Lazy load MediaPipe:\n```ts\nconst { SelfieSegmentation } = await import('@mediapipe/selfie_segmentation');\n```\nAlready implemented in initSegmentation.\n\n2. Lazy load worker:\n```ts\nconst worker = new Worker(new URL('./worker/ascii-worker.ts', import.meta.url), { type: 'module' });\n```\nOnly create worker when entering worker mode.\n\n3. Lazy load react-colorful:\n```tsx\nconst { HexColorPicker } = await import('react-colorful');\n```\nDynamically import when color picker is first opened.\n\n4. Use Vite's `manualChunks` to split vendor code:\n```ts\n// vite.config.ts\nbuild: {\n  rollupOptions: {\n    output: {\n      manualChunks: {\n        'mediapipe': ['@mediapipe/selfie_segmentation'],\n        'router': ['@tanstack/react-router'],\n      }\n    }\n  }\n}\n```\n\nTarget: initial bundle < 200KB gzipped (excluding MediaPipe WASM).",
+        "testStrategy": "Run `pnpm run build` and check dist/ bundle sizes. Verify initial chunk is < 200KB gzipped. Open Network tab and verify MediaPipe WASM loads only when webcam starts. Verify worker loads only when performance mode is enabled.",
+        "priority": "low",
+        "dependencies": [
+          "30",
+          "5",
+          "17"
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": "40",
+        "title": "Write deployment documentation",
+        "description": "Document Vercel deployment process, environment requirements, and build configuration",
+        "details": "Update `docs/infra/deployment.md`:\n\n```md\n# Deployment\n\n## Vercel (Production)\n\n1. Connect repo to Vercel\n2. Set build command: `pnpm run build`\n3. Set output directory: `dist`\n4. Deploy\n\nNo environment variables required (client-side only app).\n\n## Build Configuration\n\n- Framework: Vite\n- Node version: 18+\n- Package manager: pnpm\n- Build command: `pnpm run build`\n- Dev command: `pnpm run dev`\n\n## CDN Dependencies\n\nMediaPipe WASM is loaded from jsdelivr.net CDN at runtime. No CDN bundling required.\n\n## Browser Requirements\n\n- Modern browser with getUserMedia support\n- WebAssembly support (for MediaPipe)\n- Canvas 2D API\n- Optional: OffscreenCanvas + WebGL2 (for Phase 4 performance features)\n```\n\nUpdate README.md with deployment link once live.",
+        "testStrategy": "Follow deployment steps and verify app deploys successfully to Vercel. Verify all features work in production build. Verify MediaPipe loads from CDN.",
+        "priority": "low",
+        "dependencies": [
+          "1"
+        ],
+        "status": "pending",
+        "subtasks": []
+      }
+    ],
+    "metadata": {
+      "version": "1.0.0",
+      "lastModified": "2026-03-22T20:45:01.611Z",
+      "taskCount": 40,
+      "completedCount": 28,
+      "tags": [
+        "master"
+      ]
+    }
+  }
+}
