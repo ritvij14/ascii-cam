@@ -66,7 +66,12 @@
 **Core modules and what each owns:**
 
 - `src/store/index.ts` — entire application state + all business logic (ASCII conversion, webcam lifecycle, segmentation, rendering modes, screenshot export)
-- `src/main.tsx` — all React components and TanStack Router setup; components are UI-only, no logic
+- `src/main.tsx` — TanStack Router setup and `ReactDOM.createRoot` only; no components
+- `src/components/RootLayout.tsx` — tab nav shell with `<Outlet />`
+- `src/components/WebcamPage.tsx` — webcam route page; includes `PerfOverlay` (≤20 LOC, tightly coupled)
+- `src/components/ImagePage.tsx` — image upload route page
+- `src/components/AsciiDisplay.tsx` — shared ASCII/emoji output renderer
+- `src/components/ModeControls.tsx` — shared mode/charset/color-picker controls
 - `src/constants/character-sets.ts` — pure data: character set definitions, emoji palette, `rgbToNearestEmoji` helper
 - `src/EmojiGrid.tsx` — rendering component for emoji mode only
 - `docs/` — project documentation (features, infra, decisions, patterns)
@@ -104,6 +109,8 @@
 
 - Write as little code as possible to accomplish the task.
 - Only do things you are more than 90% sure about. If unsure, use the AskUserQuestion tool to ask a series of MCQ questions before writing any code.
+- All functions must be arrow functions — no `function` keyword declarations in components or store actions.
+- One component per file. A second component may share the file only if it is ≤20 LOC and tightly coupled to the primary component. Components live in `src/components/`.
 
 ### Code Structure
 
@@ -122,10 +129,11 @@ Before writing a `useEffect`, check which category it falls into:
 
 1. **Derived state** — Use `useMemo`, a plain `const`, or CSS. Never an effect.
 2. **Syncing React to external system** (pushing a ref/state to store) — Use ref callbacks or event handlers. Never an effect.
-3. **"Do X when Y changes"** — Trigger from the event that *caused* the change, not from observing the change. Move to store action.
+3. **"Do X when Y changes"** — Trigger from the event that _caused_ the change, not from observing the change. Move to store action.
 4. **Subscribing to external event sources** (resize, WebSocket, beforeunload) — Legitimate, but prefer `useSyncExternalStore` or a custom hook. If a `useEffect` is truly needed, it must only exist at the React/browser boundary.
 
 **Self-review checklist:**
+
 - Can this be a ref callback instead?
 - Can this be triggered by the user action that caused the state change?
 - Am I watching state just to call another action? (anti-pattern)
@@ -222,8 +230,8 @@ pnpm run dev
 
 ### PRD Index
 
-| PRD | Scope | Status |
-| --- | ----- | ------ |
+| PRD                                                | Scope                     | Status |
+| -------------------------------------------------- | ------------------------- | ------ |
 | [.taskmaster/docs/prd.md](.taskmaster/docs/prd.md) | Full project (Phases 1–4) | Active |
 
 ---
@@ -306,5 +314,6 @@ If unsure which feature doc to load, ask before loading anything.
 ---
 
 ## Task Master AI Instructions
+
 **Import Task Master's command reference and guidelines. Treat as part of this file.**
 @./.taskmaster/CLAUDE.md

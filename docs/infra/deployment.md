@@ -1,152 +1,71 @@
 # Deployment
 
-> **Deployment architecture and runbook for [PROJECT NAME].**
-> Everything needed to deploy, monitor, and operate this system.
-> Last updated: [YYYY-MM-DD]
+> **Deployment runbook for ASCII Camera.**
+> Static site — no server, no database, no environment variables.
+> Last updated: 2026-03-23
 
 ---
 
 ## Environments
 
-| Environment | URL | Purpose | Deploy trigger |
-|---|---|---|---|
-| Local | `http://localhost:[PORT]` | Development | Manual |
-| Staging | `[URL]` | Pre-production testing | Push to `staging` branch / Manual |
-| Production | `[URL]` | Live system | Push to `main` / Manual approval |
+| Environment | URL | Deploy trigger |
+|---|---|---|
+| Local | `http://localhost:5173` | `pnpm run dev` |
+| Production | https://github.com/ritvij14/ascii-cam (Vercel) | `pnpm run build` + manual push |
+
+No staging environment — this is a solo side project. Test locally before deploying.
 
 ---
 
 ## Infrastructure
 
-**Hosting:** [e.g. Google Cloud Run / Railway / Vercel / EC2]
-**Region:** [e.g. us-central1 / eu-west-1]
-**Scaling:** [e.g. Auto-scales 0-10 instances based on request load / Fixed 2 instances]
+**Hosting:** Vercel (static file serving)
+**Build output:** `dist/` — static HTML, JS, CSS bundles
+**CDN:** Vercel Edge Network (automatic)
+**External dependencies loaded at runtime:**
+- MediaPipe WASM + model files from `cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation`
 
-**Services:**
-- `[service name]` — [what it runs, how many instances, specs]
-- `[service name]` — [what it runs]
-
-**Managed services used:**
-- [e.g. Cloud SQL — PostgreSQL database]
-- [e.g. Cloud Storage — file uploads]
-- [e.g. Pub/Sub — event queue]
+No servers, no databases, no managed services, no environment variables.
 
 ---
 
-## Deployment Process
-
-### Deploying to Staging
+## Deploying to Production
 
 ```bash
-# [Steps to deploy to staging]
-[command]
-[command]
-```
+# 1. Build and type-check
+pnpm run build
 
-### Deploying to Production
+# 2. Preview the build locally before pushing
+pnpm run preview
 
-```bash
-# [Steps to deploy to production]
-[command]
-[command]
+# 3. Push to main — Vercel auto-deploys on push
+git push origin main
 ```
 
 **Pre-deploy checklist:**
-- [ ] All tests passing
-- [ ] Environment variables updated if needed
-- [ ] Database migrations ready (if applicable)
-- [ ] Feature flags configured
-
-**Post-deploy verification:**
-- [ ] Health check endpoint returns 200: `curl [URL]/health`
-- [ ] [Key user flow] works end to end
-- [ ] Error rate in monitoring is stable
+- `pnpm run build` completes without TypeScript errors
+- `pnpm run preview` — verify the app loads and webcam works in the preview build
+- MediaPipe segmentation initializes correctly (check browser console for WASM errors)
+- All three rendering modes (monochrome, color, emoji) produce output
+- Screenshot export works (download on desktop)
 
 ---
 
-## Environment Variables
+## Rollback
 
-> For local development values, see `.env.example`. For production, values are managed in [e.g. GCP Secret Manager / Railway dashboard / AWS SSM].
+Vercel keeps a deployment history. To roll back:
 
-**How to update a production env var:**
-[Steps specific to your platform]
+1. Go to the Vercel dashboard → Deployments
+2. Find the last good deployment
+3. Click "Promote to Production"
 
----
-
-## Health Check
-
-**Endpoint:** `GET /health`
-**Expected response:**
-```json
-{
-  "status": "ok",
-  "version": "[git SHA or version]",
-  "timestamp": "ISO8601"
-}
-```
+No database migrations to reverse. No state to worry about. Rollback is instant.
 
 ---
 
-## Monitoring & Observability
+## Build Notes
 
-**Logging:** [e.g. Cloud Logging / Datadog / stdout only]
-**Metrics:** [e.g. Cloud Monitoring / Datadog / None]
-**Alerts:** [e.g. PagerDuty / Email / Slack — describe what alerts exist]
-**Error tracking:** [e.g. Sentry / None]
-
-**Key things to watch:**
-- [e.g. p95 response time — alert if >500ms]
-- [e.g. Error rate — alert if >1% of requests]
-- [e.g. Memory usage — alert if >80%]
-
----
-
-## Database Operations
-
-**Backups:** [e.g. Automated daily backups, 30-day retention]
-
-**Running migrations:**
-```bash
-[migration command]
-```
-
-**Connecting to production database:**
-```bash
-# ⚠️ Be careful — this is production
-[connection command or steps]
-```
-
----
-
-## Rollback Procedure
-
-**If a deployment goes wrong:**
-
-1. [Step 1 — e.g. Revert to previous image in Cloud Run]
-2. [Step 2 — e.g. Roll back database migration if applicable]
-3. [Step 3 — e.g. Verify health check passes]
-4. [Step 4 — e.g. Notify team]
-
-```bash
-# Rollback command
-[command]
-```
-
----
-
-## Common Operational Tasks
-
-### [Task — e.g. Clearing the cache]
-```bash
-[command]
-```
-
-### [Task — e.g. Triggering a manual re-index]
-```bash
-[command]
-```
-
-### [Task — e.g. Checking logs for errors]
-```bash
-[command]
-```
+- **Vite config:** `@tailwindcss/vite` handles CSS, `@vitejs/plugin-react-swc` handles TSX compilation
+- **MediaPipe:** loaded from CDN at runtime — not bundled. First load requires network access; subsequent loads use browser cache
+- **No environment variables** — the build is identical in every environment. Nothing to configure.
+- **Web Worker (Phase 4):** when added, Vite's `worker.format: 'es'` config will bundle the worker as a separate ES module chunk

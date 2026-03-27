@@ -45,6 +45,7 @@ interface AppState {
     gridSize: string;
   } | null;
   showPerfOverlay: boolean;
+  screenshotLoading: boolean;
 }
 interface AppActions {
   // State Update
@@ -57,6 +58,7 @@ interface AppActions {
   stopRenderLoop: () => void;
   startWebcam: () => Promise<void>;
   stopWebcam: () => void;
+  clearOutput: () => void;
   updateAsciiOutput: (imageData: ImageData, maskData?: ImageData) => void;
   updateColorAsciiOutput: (imageData: ImageData) => void;
   updateEmojiOutput: (imageData: ImageData) => void;
@@ -87,6 +89,7 @@ export const useStore = create<AppStore>((set, get) => ({
   previousMaskData: null,
   perfMetrics: null,
   showPerfOverlay: false,
+  screenshotLoading: false,
 
   // Actions
   updateAppState: (partialState) => set(partialState),
@@ -112,10 +115,13 @@ export const useStore = create<AppStore>((set, get) => ({
     } else if (colorMode === 'emoji') {
       get().updateEmojiOutput(imageData);
     } else {
-      // monochrome: run segmentation if segmenter available
+      // monochrome: lazy-init segmenter then run segmentation
+      if (!get().segmenter) {
+        await get().initSegmentation();
+      }
       let maskData: ImageData | undefined;
       const { segmenter, segmentationLoading } = get();
-      if (segmenter && !segmentationLoading && maskCanvasRef) {
+      if (segmenter && !segmentationLoading) {
         try {
           maskCanvasRef.width = img.width;
           maskCanvasRef.height = img.height;
@@ -608,21 +614,23 @@ export const useStore = create<AppStore>((set, get) => ({
   takeScreenshot: async () => {
     const { colorMode, asciiOutput, coloredAsciiOutput, emojiOutput, asciiColor, selectedCharset } = get();
 
+    set({ screenshotLoading: true });
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) { set({ screenshotLoading: false }); return; }
 
     const SCALE = 3;
     const FONT_SIZE = 14 * SCALE;
     const CHAR_W = FONT_SIZE * 0.6;
     const CHAR_H = FONT_SIZE;
+    const PAD = 24 * SCALE;
 
     if (colorMode === 'emoji') {
       const { cols, rows } = emojiOutput;
-      if (!rows.length) return;
+      if (!rows.length) { set({ screenshotLoading: false }); return; }
       const EMOJI_SIZE = 20 * SCALE;
-      canvas.width = cols * EMOJI_SIZE;
-      canvas.height = rows.length * EMOJI_SIZE;
+      canvas.width = cols * EMOJI_SIZE + PAD * 2;
+      canvas.height = rows.length * EMOJI_SIZE + PAD * 2;
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.font = `${EMOJI_SIZE * 0.9}px serif`;
@@ -630,7 +638,7 @@ export const useStore = create<AppStore>((set, get) => ({
       for (let y = 0; y < rows.length; y++) {
         const chars = [...rows[y]]; // handle multi-codepoint emoji
         for (let x = 0; x < chars.length; x++) {
-          ctx.fillText(chars[x], x * EMOJI_SIZE, y * EMOJI_SIZE);
+          ctx.fillText(chars[x], PAD + x * EMOJI_SIZE, PAD + y * EMOJI_SIZE);
         }
       }
     } else if (colorMode === 'color') {
@@ -647,9 +655,9 @@ export const useStore = create<AppStore>((set, get) => ({
         }
         if (row.length > 0) { parsed.push(row); maxCols = Math.max(maxCols, row.length); }
       }
-      if (!parsed.length) return;
-      canvas.width = maxCols * CHAR_W;
-      canvas.height = parsed.length * CHAR_H;
+      if (!parsed.length) { set({ screenshotLoading: false }); return; }
+      canvas.width = maxCols * CHAR_W + PAD * 2;
+      canvas.height = parsed.length * CHAR_H + PAD * 2;
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.font = `${FONT_SIZE}px monospace`;
@@ -658,7 +666,7 @@ export const useStore = create<AppStore>((set, get) => ({
         for (let x = 0; x < parsed[y].length; x++) {
           const { char, color } = parsed[y][x];
           ctx.fillStyle = color;
-          ctx.fillText(char, x * CHAR_W, y * CHAR_H);
+          ctx.fillText(char, PAD + x * CHAR_W, PAD + y * CHAR_H);
         }
       }
     } else {
@@ -666,32 +674,33 @@ export const useStore = create<AppStore>((set, get) => ({
       const lines = asciiOutput.split('\n').filter(l => l.length > 0);
       if (!lines.length) return;
       const cols = Math.max(...lines.map(l => l.length));
-      canvas.width = cols * CHAR_W;
-      canvas.height = lines.length * CHAR_H;
+      canvas.width = cols * CHAR_W + PAD * 2;
+      canvas.height = lines.length * CHAR_H + PAD * 2;
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = asciiColor;
       ctx.font = `${FONT_SIZE}px monospace`;
       ctx.textBaseline = 'top';
       for (let y = 0; y < lines.length; y++) {
-        ctx.fillText(lines[y], 0, y * CHAR_H);
+        ctx.fillText(lines[y], PAD, PAD + y * CHAR_H);
       }
     }
 
     const filename = `ascii-cam-${Date.now()}.png`;
-    canvas.toBlob(async (blob) => {
+    canvas.toBlob((blob) => {
+      set({ screenshotLoading: false });
       if (!blob) return;
-      if (navigator.share && navigator.canShare?.({ files: [new File([blob], filename, { type: 'image/png' })] })) {
-        await navigator.share({ files: [new File([blob], filename, { type: 'image/png' })] });
-      } else {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
     }, 'image/png');
+  },
+
+  clearOutput: () => {
+    set({ asciiOutput: '', coloredAsciiOutput: '', emojiOutput: { cols: 0, rows: [] }, uploadedImage: null });
   },
 
   stopWebcam: () => {

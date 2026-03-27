@@ -3,7 +3,7 @@
 > **Auto-generated. Do not edit manually.**
 > Updated automatically after every Claude Code session via the `Stop` and `SubagentStop` hooks.
 > To regenerate manually: `bash scripts/generate-tree.sh`
-> Last generated: 2026-03-22 20:46:41 UTC
+> Last generated: 2026-03-24 03:19:05 UTC
 
 ---
 
@@ -45,6 +45,12 @@
 ├── scripts
 │   └── generate-tree.sh
 ├── src
+│   ├── components
+│   │   ├── AsciiDisplay.tsx
+│   │   ├── ImagePage.tsx
+│   │   ├── ModeControls.tsx
+│   │   ├── RootLayout.tsx
+│   │   └── WebcamPage.tsx
 │   ├── constants
 │   │   └── character-sets.ts
 │   ├── store
@@ -57,7 +63,6 @@
 ├── .DS_Store
 ├── .gitignore
 ├── .windsurfrules
-├── CLAUDE_OLD.md
 ├── CLAUDE.md
 ├── index.html
 ├── package.json
