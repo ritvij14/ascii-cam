@@ -1,14 +1,22 @@
 {
-  "permissions": {
-    "allow": ["Bash(pnpm run build:*)"]
-  },
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "touch .claude/session-changed"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/generate-tree.sh"
+            "command": "bash scripts/on-session-stop.sh"
           }
         ]
       }

@@ -1,6 +1,7 @@
-import { SelfieSegmentation } from '@mediapipe/selfie_segmentation';
+import type { SelfieSegmentation } from '@mediapipe/selfie_segmentation';
 import { create } from 'zustand';
-import { CHARACTER_SETS, DEFAULT_CHARSET, rgbToNearestEmoji } from '../constants/character-sets';
+import { DEFAULT_CHARSET } from '../constants/character-sets';
+import type { WorkerOutput } from '../worker/ascii-worker';
 
 interface AppState {
   // Webcam State
@@ -19,6 +20,7 @@ interface AppState {
 
   // Render loop
   animationFrameId: number | null;
+  segAnimationFrameId: number | null;
 
   // ASCII State
   asciiOutput: string;
@@ -32,8 +34,9 @@ interface AppState {
   // Image tab
   uploadedImage: string | null; // base64 data URL
 
-  // Temporal smoothing
-  previousMaskData: Uint8ClampedArray | null;
+  // Worker
+  asciiWorker: Worker | null;
+  workerBusy: boolean;
 
   // Performance metrics
   perfMetrics: {
@@ -56,10 +59,12 @@ interface AppActions {
   initSegmentation: () => Promise<void>;
   startRenderLoop: () => void;
   stopRenderLoop: () => void;
+  startSegmentationLoop: () => void;
+  stopSegmentationLoop: () => void;
   startWebcam: () => Promise<void>;
   stopWebcam: () => void;
   clearOutput: () => void;
-  updateAsciiOutput: (imageData: ImageData, maskData?: ImageData) => void;
+  updateAsciiOutput: (imageData: ImageData) => void;
   updateColorAsciiOutput: (imageData: ImageData) => void;
   updateEmojiOutput: (imageData: ImageData) => void;
   takeScreenshot: () => Promise<void>;
@@ -67,7 +72,42 @@ interface AppActions {
 
 type AppStore = AppState & AppActions;
 
-export const useStore = create<AppStore>((set, get) => ({
+export const useStore = create<AppStore>((set, get) => {
+  // Single-slot segmentation queue: Stage 1 writes, Stage 2 reads.
+  // Not Zustand state — no re-renders on queue changes.
+  let segQueueFrame: ImageData | null = null;
+  let segBusy = false;
+  let workerPostTime = 0;
+  let workerInstance: Worker | null = null;
+
+  const getWorker = (): Worker => {
+    if (!workerInstance) {
+      workerInstance = new Worker(new URL('../worker/ascii-worker.ts', import.meta.url), { type: 'module' });
+      workerInstance.onmessage = (e: MessageEvent<WorkerOutput>) => {
+        if (e.data.type === 'result') {
+          const asciiTimeMs = Math.round((performance.now() - workerPostTime) * 10) / 10;
+          if (e.data.asciiOutput !== undefined) {
+            set({ asciiOutput: e.data.asciiOutput, workerBusy: false });
+          } else if (e.data.coloredAsciiOutput !== undefined) {
+            set({ coloredAsciiOutput: e.data.coloredAsciiOutput, workerBusy: false });
+          } else if (e.data.emojiOutput !== undefined) {
+            set({ emojiOutput: e.data.emojiOutput, workerBusy: false });
+          }
+          const { perfMetrics } = get();
+          if (perfMetrics) set({
+            perfMetrics: {
+              ...perfMetrics,
+              asciiTimeMs,
+            }
+          });
+        }
+      };
+      set({ asciiWorker: workerInstance });
+    }
+    return workerInstance;
+  };
+
+  return {
   // Initial State
   isWebcamActive: false,
   webcamError: null,
@@ -78,6 +118,7 @@ export const useStore = create<AppStore>((set, get) => ({
   segmenter: null,
   segmentationLoading: true,
   animationFrameId: null,
+  segAnimationFrameId: null,
   asciiOutput: '',
   coloredAsciiOutput: '',
   emojiOutput: { cols: 0, rows: [] },
@@ -86,7 +127,8 @@ export const useStore = create<AppStore>((set, get) => ({
   asciiColor: '#00ff00',
   colorMode: 'monochrome',
   uploadedImage: null,
-  previousMaskData: null,
+  asciiWorker: null,
+  workerBusy: false,
   perfMetrics: null,
   showPerfOverlay: false,
   screenshotLoading: false,
@@ -119,7 +161,7 @@ export const useStore = create<AppStore>((set, get) => ({
       if (!get().segmenter) {
         await get().initSegmentation();
       }
-      let maskData: ImageData | undefined;
+      let processedImageData = imageData;
       const { segmenter, segmentationLoading } = get();
       if (segmenter && !segmentationLoading) {
         try {
@@ -128,328 +170,63 @@ export const useStore = create<AppStore>((set, get) => ({
           await segmenter.send({ image: img });
           const maskCtx = maskCanvasRef.getContext('2d');
           if (maskCtx) {
-            maskData = maskCtx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
+            const maskData = maskCtx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
+            const masked = new ImageData(
+              new Uint8ClampedArray(imageData.data),
+              imageData.width,
+              imageData.height
+            );
+            for (let i = 0; i < maskData.data.length; i += 4) {
+              const alpha = maskData.data[i] / 255;
+              const gammaCorrectedAlpha = Math.pow(alpha, 0.8);
+              masked.data[i]     = masked.data[i]     * gammaCorrectedAlpha;
+              masked.data[i + 1] = masked.data[i + 1] * gammaCorrectedAlpha;
+              masked.data[i + 2] = masked.data[i + 2] * gammaCorrectedAlpha;
+            }
+            processedImageData = masked;
           }
         } catch (_) { /* skip mask on error */ }
       }
-      get().updateAsciiOutput(imageData, maskData);
+      get().updateAsciiOutput(processedImageData);
     }
   },
 
-  updateAsciiOutput: (imageData, maskData) => {
-    const { asciiWidth, selectedCharset, previousMaskData } = get();
-    const charset = CHARACTER_SETS[selectedCharset].characters;
-
-    // Apply segmentation mask if provided
-    let processedImageData = imageData;
-    if (maskData) {
-      const masked = new ImageData(
-        new Uint8ClampedArray(imageData.data),
-        imageData.width,
-        imageData.height
-      );
-
-      // Temporal smoothing: blend current mask with previous frame's mask
-      const smoothedMask = new Uint8ClampedArray(maskData.data);
-      if (previousMaskData && previousMaskData.length === maskData.data.length) {
-        for (let i = 0; i < maskData.data.length; i += 4) {
-          smoothedMask[i] = 0.7 * maskData.data[i] + 0.3 * previousMaskData[i];
-        }
-      }
-      set({ previousMaskData: new Uint8ClampedArray(maskData.data) });
-
-      for (let i = 0; i < smoothedMask.length; i += 4) {
-        const alpha = smoothedMask[i] / 255;
-        const gammaCorrectedAlpha = Math.pow(alpha, 0.8);
-        masked.data[i] = masked.data[i] * gammaCorrectedAlpha;
-        masked.data[i + 1] = masked.data[i + 1] * gammaCorrectedAlpha;
-        masked.data[i + 2] = masked.data[i + 2] * gammaCorrectedAlpha;
-      }
-
-      processedImageData = masked;
-    }
-
-    // ASCII conversion with white balance, color temp correction, LAB brightness, and unsharp masking
-    const { data, width: imgWidth, height: imgHeight } = processedImageData;
-
-    const cellWidth = Math.floor(imgWidth / asciiWidth);
-    const cellHeight = Math.floor(cellWidth * 2);
-    const height = Math.floor(imgHeight / cellHeight);
-
-    // White balance: compute mean R, G, B across frame (Gray World algorithm)
-    const totalPixels = imgWidth * imgHeight;
-    let sumR = 0, sumG = 0, sumB = 0;
-    // Sample every 4th pixel for speed
-    for (let i = 0; i < data.length; i += 16) {
-      sumR += data[i];
-      sumG += data[i + 1];
-      sumB += data[i + 2];
-    }
-    const sampleCount = Math.ceil(totalPixels / 4);
-    const meanR = sumR / sampleCount;
-    const meanG = sumG / sampleCount;
-    const meanB = sumB / sampleCount;
-    const grayMean = (meanR + meanG + meanB) / 3;
-
-    // White balance correction factors
-    const wbR = meanR > 0 ? grayMean / meanR : 1;
-    const wbG = meanG > 0 ? grayMean / meanG : 1;
-    const wbB = meanB > 0 ? grayMean / meanB : 1;
-
-    // Color temperature detection & compensation
-    const colorTempRatio = (meanR + meanG) / (meanB + 1);
-    let tempCorrR = 1, tempCorrG = 1, tempCorrB = 1;
-    if (colorTempRatio > 2.5) {
-      // Warm light (tungsten/sunset): reduce red, boost blue
-      tempCorrR = 0.92;
-      tempCorrB = 1.08;
-    } else if (colorTempRatio < 1.5) {
-      // Cool light (fluorescent/overcast): boost red, reduce blue
-      tempCorrR = 1.08;
-      tempCorrB = 0.92;
-    }
-
-    // Helper: linearize sRGB component for LAB conversion
-    const srgbToLinear = (c: number) => {
-      const s = c / 255;
-      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-    };
-
-    // Helper: RGB to LAB L* channel (perceptually uniform lightness)
-    const rgbToLabL = (r: number, g: number, b: number): number => {
-      // Apply white balance + color temp correction
-      r = Math.min(255, r * wbR * tempCorrR);
-      g = Math.min(255, g * wbG * tempCorrG);
-      b = Math.min(255, b * wbB * tempCorrB);
-
-      // sRGB to linear
-      const lr = srgbToLinear(r);
-      const lg = srgbToLinear(g);
-      const lb = srgbToLinear(b);
-
-      // Linear RGB to CIE XYZ Y component (relative luminance)
-      const y = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
-
-      // Y to L* (CIE LAB lightness)
-      const fy = y > 0.008856 ? Math.cbrt(y) : (903.3 * y + 16) / 116;
-      return y > 0.008856 ? 116 * fy - 16 : 903.3 * y;
-    };
-
-    // First pass: compute per-cell average LAB lightness
-    const cellBrightness = new Float32Array(asciiWidth * height);
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < asciiWidth; x++) {
-        let totalL = 0;
-        let pixelCount = 0;
-        for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
-          for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
-            const index = (cy * imgWidth + cx) * 4;
-            totalL += rgbToLabL(data[index], data[index + 1], data[index + 2]);
-            pixelCount++;
-          }
-        }
-        cellBrightness[y * asciiWidth + x] = totalL / pixelCount;
-      }
-    }
-
-    // Second pass: unsharp masking and character mapping
-    const sharpenK = 0.5;
-    const parts: string[] = [];
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < asciiWidth; x++) {
-        const idx = y * asciiWidth + x;
-        const original = cellBrightness[idx];
-
-        // 3x3 neighborhood average as "blur"
-        let blurSum = 0;
-        let blurCount = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const ny = y + dy, nx = x + dx;
-            if (ny >= 0 && ny < height && nx >= 0 && nx < asciiWidth) {
-              blurSum += cellBrightness[ny * asciiWidth + nx];
-              blurCount++;
-            }
-          }
-        }
-        const blurred = blurSum / blurCount;
-
-        // Sharpened = original + k * (original - blurred), L* range is 0-100
-        const sharpened = Math.max(0, Math.min(100, original + sharpenK * (original - blurred)));
-
-        // L* is already perceptually linear, just normalize to 0-1
-        const charIndex = Math.floor((sharpened / 100) * (charset.length - 1));
-        parts.push(charset[charIndex]);
-      }
-      parts.push('\n');
-    }
-
-    set({ asciiOutput: parts.join('') });
+  updateAsciiOutput: (imageData) => {
+    const { workerBusy, asciiWidth, selectedCharset, asciiColor } = get();
+    if (workerBusy) return;
+    set({ workerBusy: true });
+    workerPostTime = performance.now();
+    getWorker().postMessage(
+      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'monochrome', asciiColor } },
+      [imageData.data.buffer]
+    );
   },
 
   updateColorAsciiOutput: (imageData) => {
-    const { asciiWidth, selectedCharset } = get();
-    const charset = CHARACTER_SETS[selectedCharset].characters;
-    const { data, width: imgWidth, height: imgHeight } = imageData;
-
-    const cellWidth = Math.floor(imgWidth / asciiWidth);
-    const cellHeight = Math.floor(cellWidth * 2);
-    const height = Math.floor(imgHeight / cellHeight);
-
-    // Helper: linearize sRGB component
-    const srgbToLinear = (c: number) => {
-      const s = c / 255;
-      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-    };
-
-    // Helper: RGB to LAB L* for character selection
-    const rgbToLabL = (r: number, g: number, b: number): number => {
-      const y = 0.2126 * srgbToLinear(r) + 0.7152 * srgbToLinear(g) + 0.0722 * srgbToLinear(b);
-      return y > 0.008856 ? 116 * Math.cbrt(y) - 16 : 903.3 * y;
-    };
-
-    // First pass: per-cell average RGB and LAB brightness
-    const cellR = new Float32Array(asciiWidth * height);
-    const cellG = new Float32Array(asciiWidth * height);
-    const cellB = new Float32Array(asciiWidth * height);
-    const cellBrightness = new Float32Array(asciiWidth * height);
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < asciiWidth; x++) {
-        let totalR = 0, totalG = 0, totalB = 0, totalL = 0, pixelCount = 0;
-        for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
-          for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
-            const i = (cy * imgWidth + cx) * 4;
-            totalR += data[i];
-            totalG += data[i + 1];
-            totalB += data[i + 2];
-            totalL += rgbToLabL(data[i], data[i + 1], data[i + 2]);
-            pixelCount++;
-          }
-        }
-        const idx = y * asciiWidth + x;
-        cellR[idx] = totalR / pixelCount;
-        cellG[idx] = totalG / pixelCount;
-        cellB[idx] = totalB / pixelCount;
-        cellBrightness[idx] = totalL / pixelCount;
-      }
-    }
-
-    // Second pass: unsharp masking + build colored HTML string
-    const sharpenK = 0.5;
-    const parts: string[] = [];
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < asciiWidth; x++) {
-        const idx = y * asciiWidth + x;
-        const original = cellBrightness[idx];
-
-        let blurSum = 0, blurRSum = 0, blurGSum = 0, blurBSum = 0, blurCount = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const ny = y + dy, nx = x + dx;
-            if (ny >= 0 && ny < height && nx >= 0 && nx < asciiWidth) {
-              const nidx = ny * asciiWidth + nx;
-              blurSum += cellBrightness[nidx];
-              blurRSum += cellR[nidx];
-              blurGSum += cellG[nidx];
-              blurBSum += cellB[nidx];
-              blurCount++;
-            }
-          }
-        }
-        const sharpened = Math.max(0, Math.min(100, original + sharpenK * (original - blurSum / blurCount)));
-        const charIndex = Math.floor((sharpened / 100) * (charset.length - 1));
-        const char = charset[charIndex];
-
-        // Unsharp mask on color channels (k=0.8 for stronger color edge pop)
-        const colorK = 0.8;
-        const sR = Math.max(0, Math.min(255, cellR[idx] + colorK * (cellR[idx] - blurRSum / blurCount)));
-        const sG = Math.max(0, Math.min(255, cellG[idx] + colorK * (cellG[idx] - blurGSum / blurCount)));
-        const sB = Math.max(0, Math.min(255, cellB[idx] + colorK * (cellB[idx] - blurBSum / blurCount)));
-
-        // Boost color: lift dark floor (gamma 0.55) + boost saturation (1.5x)
-        let cr = sR / 255, cg = sG / 255, cb = sB / 255;
-        // Gamma lift
-        cr = Math.pow(cr, 0.55); cg = Math.pow(cg, 0.55); cb = Math.pow(cb, 0.55);
-        // Saturation boost via HSL
-        const cmax = Math.max(cr, cg, cb), cmin = Math.min(cr, cg, cb);
-        const l = (cmax + cmin) / 2;
-        const d = cmax - cmin;
-        if (d > 0) {
-          const s = Math.min(1, (d / (1 - Math.abs(2 * l - 1))) * 1.5);
-          const chroma = s * (1 - Math.abs(2 * l - 1));
-          let h = 0;
-          if (cmax === cr) h = ((cg - cb) / d + 6) % 6;
-          else if (cmax === cg) h = (cb - cr) / d + 2;
-          else h = (cr - cg) / d + 4;
-          const x = chroma * (1 - Math.abs(h % 2 - 1));
-          const m = l - chroma / 2;
-          const hi = Math.floor(h);
-          const [r1, g1, b1] = hi === 0 ? [chroma, x, 0] : hi === 1 ? [x, chroma, 0] :
-            hi === 2 ? [0, chroma, x] : hi === 3 ? [0, x, chroma] :
-            hi === 4 ? [x, 0, chroma] : [chroma, 0, x];
-          cr = Math.min(1, r1 + m); cg = Math.min(1, g1 + m); cb = Math.min(1, b1 + m);
-        }
-        const r = Math.round(cr * 255).toString(16).padStart(2, '0');
-        const g = Math.round(cg * 255).toString(16).padStart(2, '0');
-        const b = Math.round(cb * 255).toString(16).padStart(2, '0');
-        parts.push(`<span style="color:#${r}${g}${b}">${char}</span>`);
-      }
-      parts.push('\n');
-    }
-
-    set({ coloredAsciiOutput: parts.join('') });
+    const { workerBusy, asciiWidth, selectedCharset, asciiColor } = get();
+    if (workerBusy) return;
+    set({ workerBusy: true });
+    workerPostTime = performance.now();
+    getWorker().postMessage(
+      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'color', asciiColor } },
+      [imageData.data.buffer]
+    );
   },
 
   updateEmojiOutput: (imageData) => {
-    const { asciiWidth } = get();
-    const { data, width: imgWidth, height: imgHeight } = imageData;
-
-    // Square cells: 1:1 aspect ratio (emojis are square, unlike ASCII chars)
-    const cellSize = Math.floor(imgWidth / asciiWidth);
-    const height = Math.floor(imgHeight / cellSize);
-
-    // White balance: gray world algorithm
-    const totalPixels = imgWidth * imgHeight;
-    let sumR = 0, sumG = 0, sumB = 0;
-    for (let i = 0; i < data.length; i += 16) {
-      sumR += data[i]; sumG += data[i + 1]; sumB += data[i + 2];
-    }
-    const sampleCount = Math.ceil(totalPixels / 4);
-    const grayMean = (sumR + sumG + sumB) / (3 * sampleCount);
-    const wbR = sumR > 0 ? grayMean / (sumR / sampleCount) : 1;
-    const wbG = sumG > 0 ? grayMean / (sumG / sampleCount) : 1;
-    const wbB = sumB > 0 ? grayMean / (sumB / sampleCount) : 1;
-
-    const rows: string[] = [];
-    for (let y = 0; y < height; y++) {
-      const rowEmojis: string[] = [];
-      for (let x = 0; x < asciiWidth; x++) {
-        let totalR = 0, totalG = 0, totalB = 0, pixelCount = 0;
-        for (let cy = y * cellSize; cy < y * cellSize + cellSize; cy++) {
-          for (let cx = x * cellSize; cx < x * cellSize + cellSize; cx++) {
-            const i = (cy * imgWidth + cx) * 4;
-            totalR += data[i];
-            totalG += data[i + 1];
-            totalB += data[i + 2];
-            pixelCount++;
-          }
-        }
-        const r = Math.min(255, (totalR / pixelCount) * wbR);
-        const g = Math.min(255, (totalG / pixelCount) * wbG);
-        const b = Math.min(255, (totalB / pixelCount) * wbB);
-        rowEmojis.push(rgbToNearestEmoji(r, g, b));
-      }
-      rows.push(rowEmojis.join(''));
-    }
-
-    set({ emojiOutput: { cols: asciiWidth, rows } });
+    const { workerBusy, asciiWidth, selectedCharset, asciiColor } = get();
+    if (workerBusy) return;
+    set({ workerBusy: true });
+    workerPostTime = performance.now();
+    getWorker().postMessage(
+      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'emoji', asciiColor } },
+      [imageData.data.buffer]
+    );
   },
 
   initSegmentation: async () => {
     try {
+      const { SelfieSegmentation } = await import('@mediapipe/selfie_segmentation');
       const selfieSegmentation = new SelfieSegmentation({
         locateFile: (file) =>
           `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`,
@@ -457,7 +234,7 @@ export const useStore = create<AppStore>((set, get) => ({
 
       selfieSegmentation.setOptions({
         modelSelection: 1,
-        selfieMode: true,
+        selfieMode: false,
       });
 
       selfieSegmentation.onResults((results) => {
@@ -484,14 +261,14 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!videoRef || !canvasRef || !maskCanvasRef) return;
 
     const ctx = canvasRef.getContext('2d');
-    const maskCtx = maskCanvasRef.getContext('2d');
-    if (!ctx || !maskCtx) return;
+    if (!ctx) return;
 
     let lastFrameTime = 0;
     const targetFrameMs = 33;
     let aspectChecked = false;
 
-    const captureFrame = async (timestamp: number) => {
+    // Stage 1: pure video capture. Never blocks on segmentation.
+    const captureFrame = (timestamp: number) => {
       if (timestamp - lastFrameTime < targetFrameMs) {
         set({ animationFrameId: requestAnimationFrame(captureFrame) });
         return;
@@ -519,40 +296,28 @@ export const useStore = create<AppStore>((set, get) => ({
 
         const imageData = ctx.getImageData(0, 0, canvasRef.width, canvasRef.height);
 
-        let maskData: ImageData | undefined;
-        let segTime = 0;
-        const { segmenter, segmentationLoading, colorMode } = get();
-        if (colorMode === 'monochrome' && segmenter && !segmentationLoading) {
-          try {
-            const segStart = performance.now();
-            await segmenter.send({ image: videoRef });
-            maskData = maskCtx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
-            segTime = performance.now() - segStart;
-          } catch (err) {
-            console.error('Segmentation error:', err);
-          }
-        }
-
-        const asciiStart = performance.now();
+        const { colorMode } = get();
         if (colorMode === 'color') {
           get().updateColorAsciiOutput(imageData);
         } else if (colorMode === 'emoji') {
           get().updateEmojiOutput(imageData);
         } else {
-          get().updateAsciiOutput(imageData, maskData);
+          // Monochrome: push frame to seg queue (Stage 2 picks it up).
+          // Overwrite any queued frame — Stage 2 always gets the newest.
+          segQueueFrame = imageData;
         }
-        const asciiTime = performance.now() - asciiStart;
 
         const frameTime = performance.now() - frameStart;
+        const frameInterval = lastFrameTime > 0 ? timestamp - lastFrameTime : frameTime;
         lastFrameTime = timestamp;
 
-        const { asciiWidth } = get();
+        const { asciiWidth, perfMetrics } = get();
         set({
           perfMetrics: {
-            fps: Math.round(1000 / Math.max(frameTime, 1)),
+            fps: Math.round(1000 / Math.max(frameInterval, 1)),
             frameTimeMs: Math.round(frameTime * 10) / 10,
-            segTimeMs: Math.round(segTime * 10) / 10,
-            asciiTimeMs: Math.round(asciiTime * 10) / 10,
+            segTimeMs: perfMetrics?.segTimeMs ?? 0,
+            asciiTimeMs: perfMetrics?.asciiTimeMs ?? 0,
             resolution: `${videoRef.videoWidth}x${videoRef.videoHeight}`,
             gridSize: `${asciiWidth}x${Math.floor(videoRef.videoHeight / (Math.floor(videoRef.videoWidth / asciiWidth) * 2))}`,
           },
@@ -563,14 +328,79 @@ export const useStore = create<AppStore>((set, get) => ({
     };
 
     set({ animationFrameId: requestAnimationFrame(captureFrame) });
+    get().startSegmentationLoop();
   },
 
   stopRenderLoop: () => {
     const { animationFrameId } = get();
-    if (animationFrameId) {
-      cancelAnimationFrame(animationFrameId);
-    }
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
     set({ animationFrameId: null });
+    get().stopSegmentationLoop();
+  },
+
+  // Stage 2: segmentation loop — runs independently at MediaPipe throughput.
+  startSegmentationLoop: () => {
+    const { canvasRef, maskCanvasRef } = get();
+    if (!canvasRef || !maskCanvasRef) return;
+    const maskCtx = maskCanvasRef.getContext('2d');
+    if (!maskCtx) return;
+
+    const segLoop = async (_timestamp: number) => {
+      const { segmenter, segmentationLoading, colorMode } = get();
+
+      if (colorMode === 'monochrome' && segmenter && !segmentationLoading && segQueueFrame && !segBusy) {
+        const frame = segQueueFrame;
+        segQueueFrame = null;
+        segBusy = true;
+
+        const segStart = performance.now();
+        let processedImageData: ImageData = frame;
+        try {
+          // Draw the queued frame onto maskCanvas before sending to MediaPipe.
+          // This ensures the segmentation mask corresponds to the exact same
+          // frame we're applying it to — prevents mask/frame temporal mismatch
+          // caused by Stage 1 updating canvasRef between frames.
+          maskCanvasRef.width = frame.width;
+          maskCanvasRef.height = frame.height;
+          maskCtx.putImageData(frame, 0, 0);
+          await segmenter.send({ image: maskCanvasRef });
+          // onResults callback has now overwritten maskCanvas with the mask.
+          const maskData = maskCtx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
+          const masked = new ImageData(
+            new Uint8ClampedArray(frame.data),
+            frame.width,
+            frame.height
+          );
+          for (let i = 0; i < maskData.data.length; i += 4) {
+            const alpha = maskData.data[i] / 255;
+            const gammaCorrectedAlpha = Math.pow(alpha, 0.8);
+            masked.data[i]     = masked.data[i]     * gammaCorrectedAlpha;
+            masked.data[i + 1] = masked.data[i + 1] * gammaCorrectedAlpha;
+            masked.data[i + 2] = masked.data[i + 2] * gammaCorrectedAlpha;
+          }
+          processedImageData = masked;
+        } catch { /* skip mask on error, use unmasked frame */ }
+
+        get().updateAsciiOutput(processedImageData);
+        segBusy = false;
+
+        const segTime = performance.now() - segStart;
+        const { perfMetrics } = get();
+        if (perfMetrics) set({ perfMetrics: { ...perfMetrics, segTimeMs: Math.round(segTime * 10) / 10 } });
+      }
+
+      set({ segAnimationFrameId: requestAnimationFrame(segLoop) });
+    };
+
+    set({ segAnimationFrameId: requestAnimationFrame(segLoop) });
+  },
+
+  stopSegmentationLoop: () => {
+    const { segAnimationFrameId } = get();
+    if (segAnimationFrameId) cancelAnimationFrame(segAnimationFrameId);
+    set({ segAnimationFrameId: null });
+    segQueueFrame = null;
+    segBusy = false;
   },
 
   startWebcam: async () => {
@@ -723,4 +553,5 @@ export const useStore = create<AppStore>((set, get) => ({
       segmentationLoading: true,
     });
   },
-}));
+  }; // end of returned state+actions object
+}); // end of create callback

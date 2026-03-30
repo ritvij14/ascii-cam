@@ -161,6 +161,70 @@ A browser API for high-resolution DOM capture becomes reliable across all target
 
 ---
 
+### ADR-007: Web Worker for ASCII conversion pipeline
+
+**Date:** 2026-03-27
+**Status:** Active (scaffold in place; logic migration in progress)
+
+**Decision:**
+The ASCII conversion pipeline (monochrome, color, emoji) is being moved from the main thread into a dedicated Web Worker (`src/worker/ascii-worker.ts`). The store owns the worker lifecycle and message protocol; the worker is a pure computation engine with no state.
+
+**Context:**
+`updateAsciiOutput` / `updateColorAsciiOutput` / `updateEmojiOutput` each take ~20–40ms per frame at 720p. Running them on the main thread blocks React rendering and user input during that window. At 30fps the frame budget is 33ms — the conversion alone can consume the entire budget, leaving no time for layout, paint, or input handling.
+
+**Options considered:**
+- **Option A (chosen) — Dedicated Web Worker:** Move pixel math to a worker thread. Main thread orchestrates via postMessage + transferables.
+- **Option B — OffscreenCanvas:** Offload canvas drawing to a worker. Doesn't help with the conversion math itself, only rendering.
+- **Option C — WASM module:** Rewrite hot loops in Rust/C++ compiled to WASM. Maximum throughput but very high implementation cost.
+- **Option D — Optimize in place:** Reduce constant factors (fewer allocations, SIMD-style tricks in JS). Bounded improvement, still on main thread.
+
+**Reasoning:**
+Option A gives the main thread full relief from the conversion cost with moderate implementation effort. The message protocol (postMessage + transferable ImageData.buffer) is standard and well-supported. Option B only helps if canvas rendering is the bottleneck, which it isn't — the math is. Option C has a much higher cost and is premature. Option D can be done in parallel but doesn't unblock the main thread.
+
+**Tradeoffs accepted:**
+- `ImageData.buffer` is transferred (not copied) to the worker — the main-thread buffer is detached after `postMessage`. The canvas must extract a fresh `ImageData` each frame rather than reusing a buffer.
+- The worker adds one round-trip latency (~0ms for computation, but asynchronous) before output is written to state. The render loop must become async/callback-based rather than synchronous.
+- Worker is lazy-initialized on the first processed frame (see ADR-009). The first frame incurs a one-time ~1–5ms worker spawn cost.
+
+**Revisit when:**
+Worker communication overhead becomes measurable (unlikely — `postMessage` with transferables is fast). Or if the conversion logic needs DOM access (workers have no DOM — would require a different approach).
+
+---
+
+### ADR-008: WebGL2 acceleration for per-pixel LAB brightness calculation
+
+**Date:** 2026-03-29
+**Status:** Active
+
+**Decision:**
+MLAB L* brightness calculation in monochrome mode uses WebGL2 fragment shaders when available (Chrome, Firefox, Edge; Safari ≥16.4). The shader applies white balance and color temperature, then converts RGB → linear sRGB → XYZ → LAB L*.CPU path remains as fallback.
+
+**Context:**
+Per-pixel LAB conversion is the dominant cost in `processMonochrome()`:
+- At 720p: ~920,000 pixels per frame
+- At 30fps: ~27.6 million pixels per second
+- Each pixel: sRGB→linear→XYZ→LAB L* (multiple matrix multiplications, cube roots, conditionals)
+
+This CPU cost often exceeds the 33ms frame budget on integrated graphics laptops and mid-range phones.
+
+**Options considered:**
+- **Option A (chosen) — WebGL2 shader in worker:** Create offscreen GL context, render fullscreen quad with LAB conversion shader, read pixels back via `gl.readPixels()`.
+- **Option B — WebGPU compute shader:** More modern API, but lower browser support (Chrome/Edge only, behind flags in Firefox).
+- **Option C — SIMD-optimized WASM:** Compile LAB conversion to WASM with SIMD intrinsics. Higher implementation cost, requires build toolchain.
+
+**Reasoning:**
+Option A gives the best balance of performance gain (10–100× faster pixel math) and browser support. WebGL2 is universally supported on desktop and most mobile browsers. The shader approach parallelizes across GPU cores natively. Option B would leave Safari and older browsers without acceleration. Option C requires Rust/C++ tooling and adds build complexity not justified by the incremental gain over WebGL2.
+
+**Tradeoffs accepted:**
+- `gl.readPixels()` is synchronous and stalls the GPU pipeline. For 720p RGBA this is ~2.8MB per frame — acceptable at 30fps on integrated GPUs, but could bottleneck on very low-end devices.
+- WebGL context creation can fail silently on some hardware configurations; CPU fallback must be robust.
+- Safari <16.4 lacks OffscreenCanvas webgl support — users get CPU path (no regression).
+
+**Revisit when:**
+WebGPU achieves broader support (Safari, Firefox stable) and provides significant additional benefit over WebGL2 for this use case, or if `gl.readPixels()` becomes the dominant bottleneck.
+
+---
+
 ### ADR-006: MediaPipe selfie segmentation always-on, no UI toggle
 
 **Date:** 2026-01-01
@@ -186,3 +250,65 @@ Option B adds UI complexity and a mode the user has to understand. Option C requ
 
 **Revisit when:**
 Performance work (Phase 4) reveals that segmentation is the primary bottleneck on target hardware, or user feedback consistently requests background-on mode.
+
+---
+
+### ADR-008: Two independent rAF loops for video capture and segmentation
+
+**Date:** 2026-03-29
+**Status:** Active
+
+**Decision:**
+The render pipeline uses two separate `requestAnimationFrame` loops: Stage 1 (video capture) and Stage 2 (segmentation). They communicate via a single-slot closure variable (`segQueueFrame`). Stage 1 never `await`s anything.
+
+**Context:**
+Previously a single rAF loop called `await segmenter.send()` inline. Because the loop function was `async`, the `await` yielded the thread for ~20–50ms while MediaPipe processed the frame. During that yield, no new rAF could fire — video capture stalled at MediaPipe's throughput (~20fps) rather than the camera's 30fps.
+
+**Why two rAF loops over alternatives:**
+- *Single async rAF*: the original approach — segmentation blocks video capture.
+- *setTimeout for Stage 2*: possible, but rAF is better for main-thread work (pause-on-hidden-tab, vsync alignment).
+- *Worker for segmentation*: MediaPipe is already WASM-based and doesn't expose a worker-compatible API without major wrapping. Not worth the complexity.
+- *Two rAF loops*: Stage 1 is synchronous and always runs at full 30fps. Stage 2 is async but isolated — its `await` only pauses Stage 2's own loop. Implemented with minimal new state (`segAnimationFrameId`).
+
+**Single-slot mailbox design:**
+`segQueueFrame` holds at most one `ImageData`. Stage 1 overwrites it on every capture (last-write-wins). Stage 2 reads it when ready. This means Stage 2 always processes the *most recent* frame, never an accumulated backlog. On slow hardware where segmentation takes longer than 33ms, ASCII output simply updates at a lower rate while video capture stays smooth.
+
+**Tradeoffs:**
+- Slight temporal mismatch: the mask computed in Stage 2 uses `canvasRef` (which Stage 1 may have overwritten). The delta is one Stage-1 frame interval (~33ms) at most — imperceptible at 30fps. Temporal smoothing (70/30 blend) further masks any edge flicker.
+- `segAnimationFrameId` adds one more rAF handle to track in `stopRenderLoop`.
+
+**Revisit when:**
+Stage 2 is separated further into its own worker (would eliminate the temporal mismatch entirely), or if WebGPU/OffscreenCanvas makes MediaPipe worker-compatible.
+
+---
+
+### ADR-009: Lazy loading for MediaPipe, ASCII worker, and react-colorful
+
+**Date:** 2026-03-30
+**Status:** Active
+
+**Decision:**
+Three heavy dependencies are deferred until they are actually needed:
+- `@mediapipe/selfie_segmentation` — dynamic import inside `initSegmentation()`, called only when the user starts the webcam.
+- `ascii-worker` — `new Worker(new URL(...))` is called by `getWorker()` on the first ASCII frame, not at store creation.
+- `react-colorful` (`HexColorPicker`) — loaded via `React.lazy()` + `Suspense`, downloaded only when the color picker is first opened.
+
+Vite `manualChunks` names the `mediapipe` and `router` chunks for stable filenames and predictable cache behavior.
+
+**Context:**
+With eager imports the initial JS parse-and-execute cost included ~44 kB of MediaPipe JS and the worker module even before the user interacted with anything. The app's main bundle should be as small as possible since the landing experience is just a tab nav.
+
+**Options considered:**
+- **Option A (chosen) — Lazy load heavy deps:** Dynamic imports at the usage site.
+- **Option B — Keep eager imports:** Simpler code, slightly higher initial load cost.
+
+**Reasoning:**
+Option A reduces the initial bundle to ~14 kB (4.7 kB gzip) — the MediaPipe and worker chunks only download when the webcam is first started. `react-colorful` (~14 kB) only downloads when the user opens the color picker. Option B is simpler but leaves the initial load heavier than needed for a page that starts as a static tab.
+
+**Tradeoffs accepted:**
+- The first webcam start has a one-time fetch for the MediaPipe chunk (~44 kB gzip: 17 kB). Subsequent starts use the browser cache.
+- `getWorker()` in the store is a closure-based lazy initializer — it cannot be directly unit-tested without triggering a real Worker instantiation.
+- `HexColorPicker` wrapped in `Suspense fallback={null}` means there's a single frame where the picker container renders without the picker — imperceptible at normal network speeds.
+
+**Revisit when:**
+MediaPipe or the worker chunk grow large enough that the first-start latency becomes noticeable (> 500ms on a slow connection), at which point a preload hint (`<link rel="modulepreload">`) could be added to `index.html` without reverting to eager imports.

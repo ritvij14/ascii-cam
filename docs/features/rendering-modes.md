@@ -1,9 +1,9 @@
 # Rendering Modes
 
 > **Feature doc for the three rendering modes: monochrome, color, and emoji.**
-> Covers mode switching, per-mode output pipeline, color post-processing, and component rendering.
+> Covers mode switching, per-mode output pipeline, color post-processing, edge detection, and component rendering.
 > Status: Stable
-> Last updated: 2026-03-23
+> Last updated: 2026-03-29
 
 ---
 
@@ -198,6 +198,21 @@ Defined in `src/constants/character-sets.ts`. Used by monochrome and color modes
 `DEFAULT_CHARSET` is `'STANDARD'`. The active charset is read from `CHARACTER_SETS[selectedCharset].characters` in each update function.
 
 Character order is light → dark: the first character maps to brightness 0 (darkest/background) and the last maps to brightness 100 (brightest). Charset strings must maintain this ordering — inserting characters out of order will corrupt the brightness mapping.
+
+### Edge Detection (Monochrome Mode)
+
+In monochrome mode, edge detection is automatically enabled to enhance edge sharpness. The Sobel operator is applied to the brightness grid:
+
+1. **Sobel gradient computation** — For each cell, compute 3×3 Sobel X and Y gradients from neighboring brightness values
+2. **Edge magnitude** — `magnitude = sqrt(gx² + gy²)` — if > 15, considered a strong edge
+3. **Edge direction** — `angle = atan2(gy, gx)` — maps to directional character:
+   - Near 0° or 180° → `—` (horizontal)
+   - Near ±90° → `|` (vertical)
+   - Near +45° → `/` (diagonal up)
+   - Near -45° → `\` (diagonal down)
+4. **Fallback** — Non-edge cells use brightness-based character from the selected charset
+
+This produces a sketch-like effect where edges are highlighted with directional characters while flat areas use the gradient from the charset.
 
 ---
 

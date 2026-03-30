@@ -3,7 +3,7 @@
 > **Auto-generated. Do not edit manually.**
 > Updated automatically after every Claude Code session via the `Stop` and `SubagentStop` hooks.
 > To regenerate manually: `bash scripts/generate-tree.sh`
-> Last generated: 2026-03-24 03:19:05 UTC
+> Last generated: 2026-03-30 03:27:34 UTC
 
 ---
 
@@ -18,7 +18,9 @@
 │   │   │   ├── next-task.md
 │   │   │   └── smart-workflow.md
 │   │   └── wrap-up.md
-│   └── settings.json
+│   ├── session-changed
+│   ├── settings.json
+│   └── settings.local.json
 ├── .taskmaster
 │   ├── docs
 │   │   └── prd.md
@@ -37,13 +39,15 @@
 │   │   ├── screenshot.md
 │   │   └── webcam-ascii.md
 │   └── infra
+│       ├── changelog.md
 │       ├── decisions.md
 │       ├── deployment.md
 │       ├── file-tree.md
 │       └── patterns.md
 ├── public
 ├── scripts
-│   └── generate-tree.sh
+│   ├── generate-tree.sh
+│   └── on-session-stop.sh
 ├── src
 │   ├── components
 │   │   ├── AsciiDisplay.tsx
@@ -55,6 +59,8 @@
 │   │   └── character-sets.ts
 │   ├── store
 │   │   └── index.ts
+│   ├── worker
+│   │   └── ascii-worker.ts
 │   ├── .DS_Store
 │   ├── EmojiGrid.tsx
 │   ├── index.css

@@ -10,7 +10,7 @@
 > - You spend more than 10 minutes figuring out the right way to do something
 > - A code review surfaces "this should be done like X" — write X down here
 >
-> Last updated: 2026-03-23
+> Last updated: 2026-03-27
 
 ---
 
@@ -285,7 +285,7 @@ for (let y = 0; y < height; y++) {
 - Boundary cells (edges of the grid) have fewer than 9 neighbors — the `if (ny >= 0 && ...)` guard handles this correctly by computing the average over however many neighbors exist.
 
 **Example usage in this codebase:**
-`src/store/index.ts:232-282` — `updateAsciiOutput` (monochrome), `src/store/index.ts:333-397` — `updateColorAsciiOutput` (color).
+`src/worker/ascii-worker.ts` — `processMonochrome` (monochrome, runs in worker), `src/store/index.ts` — `updateColorAsciiOutput` (color, still on main thread).
 
 ---
 
@@ -345,6 +345,7 @@ takeScreenshot: async () => {
 - For emoji mode, spread each row with `[...rows[y]]` before iterating — emoji strings contain multi-codepoint sequences (e.g. skin tone modifiers) that split incorrectly with index access.
 - Always `URL.revokeObjectURL` after the download — object URLs are not garbage collected automatically.
 - Always use `<a download>` rather than `navigator.share` — the share sheet on macOS/iOS prompts to add to Photos or AirDrop, not to save a file.
+- Any loading state flag (e.g. `screenshotLoading`) must be reset on **every** early-return path, not just in the happy path. `toBlob` is callback-based, so the reset belongs at the top of the callback — not after the `toBlob` call site.
 
 **Example usage in this codebase:**
 `src/store/index.ts:608-694` — `takeScreenshot`.

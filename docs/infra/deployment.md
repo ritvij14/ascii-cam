@@ -68,4 +68,17 @@ No database migrations to reverse. No state to worry about. Rollback is instant.
 - **Vite config:** `@tailwindcss/vite` handles CSS, `@vitejs/plugin-react-swc` handles TSX compilation
 - **MediaPipe:** loaded from CDN at runtime — not bundled. First load requires network access; subsequent loads use browser cache
 - **No environment variables** — the build is identical in every environment. Nothing to configure.
-- **Web Worker (Phase 4):** when added, Vite's `worker.format: 'es'` config will bundle the worker as a separate ES module chunk
+- **Web Worker:** Vite's `worker.format: 'es'` config bundles the ASCII worker as a separate ES module chunk (`ascii-worker-*.js`). The worker is lazy-initialized on the first frame — not loaded at app startup.
+
+## Bundle Splitting
+
+Code splitting is configured in `vite.config.ts` via `build.rollupOptions.output.manualChunks`:
+
+| Chunk | Contents | Load trigger |
+|---|---|---|
+| `mediapipe-*.js` | `@mediapipe/selfie_segmentation` | First webcam start (dynamic import in `initSegmentation`) |
+| `router-*.js` | `@tanstack/react-router` | Eager (loaded with app) |
+| `ascii-worker-*.js` | ASCII/emoji/color processing worker | First frame processed (lazy Worker init) |
+| `react-colorful` | HexColorPicker | First time color picker is opened (React.lazy) |
+
+**Target:** initial bundle < 200KB gzipped (achieved — main chunk is ~5 KB gzipped).

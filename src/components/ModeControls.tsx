@@ -1,6 +1,8 @@
-import { HexColorPicker } from "react-colorful";
+import { lazy, Suspense } from "react";
 import { CHARACTER_SETS } from "../constants/character-sets";
 import { useStore } from "../store";
+
+const HexColorPicker = lazy(() => import("react-colorful").then((m) => ({ default: m.HexColorPicker })));
 
 interface ModeControlsProps {
   showColorPicker: boolean;
@@ -33,11 +35,13 @@ const ModeControls = ({ showColorPicker, setShowColorPicker, onModeChange, onCha
               />
             ))}
           </div>
-          <HexColorPicker
-            color={asciiColor}
-            onChange={(color) => updateAppState({ asciiColor: color })}
-            style={{ width: "180px", height: "130px" }}
-          />
+          <Suspense fallback={null}>
+            <HexColorPicker
+              color={asciiColor}
+              onChange={(color) => updateAppState({ asciiColor: color })}
+              style={{ width: "180px", height: "130px" }}
+            />
+          </Suspense>
         </div>
       )}
 
@@ -76,6 +80,7 @@ const ModeControls = ({ showColorPicker, setShowColorPicker, onModeChange, onCha
           ))}
         </div>
       )}
+
     </>
   );
 };

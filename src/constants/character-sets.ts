@@ -5,7 +5,7 @@ export interface CharacterSet {
 }
 
 export const CHARACTER_SETS: Record<string, CharacterSet> = {
-MINIMAL: {
+  MINIMAL: {
     name: 'Minimal',
     description: 'Basic ASCII characters',
     characters: ' .:-=+*#%@',
