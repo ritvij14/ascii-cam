@@ -1,12 +1,16 @@
 /// <reference lib="webworker" />
 
-import { CHARACTER_SETS, EMOJI_COLOR_PALETTE } from '../constants/character-sets';
+import { BAYER_MATRIX_4X4, CHARACTER_SETS } from '../constants/character-sets';
 
 export interface WorkerConfig {
   asciiWidth: number;
   selectedCharset: string;
-  colorMode: 'monochrome' | 'color' | 'emoji';
+  colorMode: 'monochrome' | 'color';
   asciiColor: string;
+  contrast: number;
+  intensity: number;
+  noise: number;
+  histogramEqualization: boolean;
 }
 
 export interface WorkerInput {
@@ -19,7 +23,6 @@ export interface WorkerOutput {
   type: 'result';
   asciiOutput?: string;
   coloredAsciiOutput?: string;
-  emojiOutput?: { cols: number; rows: string[] };
 }
 
 // ============================================================================
@@ -51,8 +54,8 @@ interface WhiteBalanceParams {
 }
 
 /**
- * Use WebGL to compute per-pixel LAB L* brightness values.
- * Returns a Float32Array where each element is the L* value (0-100) for that pixel.
+ * Use WebGL to compute per-pixel luminosity values.
+ * Returns a Float32Array where each element is the luminosity (0-100) for that pixel.
  */
 function computeBrightnessWithWebGL(
   imageData: ImageData,
@@ -84,9 +87,6 @@ function computeBrightnessWithWebGL(
     gl.UNSIGNED_BYTE, // type
     imageData.data
   );
-
-  const texError = gl.getError();
-  console.log('[WebGL] Texture upload error code:', texError === gl.NO_ERROR ? 'NONE' : texError);
 
   // Set up framebuffer with RGBA8 texture as render target
   const renderTexture = gl.createTexture();
@@ -158,10 +158,9 @@ function computeBrightnessWithWebGL(
   const pixels = new Uint8Array(width * height * 4);
   gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
 
-  // Convert to Float32Array of L* values (0-100)
+  // Convert to Float32Array of luminosity values (0-100)
   const brightness = new Float32Array(width * height);
   for (let i = 0, j = 0; i < pixels.length; i += 4, j++) {
-    // R channel contains normalized L* (0-1), scale back to 0-100
     brightness[j] = (pixels[i] / 255) * 100;
   }
 
@@ -194,7 +193,7 @@ void main() {
 }
 `;
 
-// Fragment shader: RGB -> LAB L* brightness calculation with white balance
+// Fragment shader: RGB -> luminosity grayscale with white balance
 const fragmentShaderSource = `#version 300 es
   precision highp float;
 
@@ -205,27 +204,16 @@ const fragmentShaderSource = `#version 300 es
   uniform vec3 uWhiteBalance;
   uniform vec3 uColorTemp;
 
-  float srgbToLinear(float c) {
-    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
-  }
-
-  float rgbToLabL(vec3 rgb) {
-    // rgb is already in [0, 1] from texture sampling (gl.UNSIGNED_BYTE normalizes automatically)
+  float rgbToLum(vec3 rgb) {
     vec3 corrected = clamp(rgb * uWhiteBalance * uColorTemp, 0.0, 1.0);
-    vec3 linear;
-    linear.r = srgbToLinear(corrected.r);
-    linear.g = srgbToLinear(corrected.g);
-    linear.b = srgbToLinear(corrected.b);
-    float y = 0.2126 * linear.r + 0.7152 * linear.g + 0.0722 * linear.b;
-    float fy = (y > 0.008856) ? pow(y, 1.0 / 3.0) : (903.3 * y + 16.0) / 116.0;
-    return 116.0 * fy - 16.0;
+    float lum = 0.299 * corrected.r + 0.587 * corrected.g + 0.114 * corrected.b;
+    return lum;
   }
 
   void main() {
     vec4 color = texture(uTexture, vTexCoord);
-    float L = rgbToLabL(color.rgb);
-    float normalized = L / 100.0;
-    fragColor = vec4(normalized, normalized, normalized, 1.0);
+    float lum = rgbToLum(color.rgb);
+    fragColor = vec4(lum, lum, lum, 1.0);
   }
   `;
 
@@ -349,13 +337,54 @@ function initWebGL(): WebGLResources | null {
 glResources = initWebGL();
 
 
+const applyHistogramEqualization = (brightness: Float32Array): void => {
+  const bins = 256;
+  const hist = new Uint32Array(bins);
+
+  for (let i = 0; i < brightness.length; i++) {
+    const bin = Math.min(bins - 1, Math.max(0, Math.floor((brightness[i] / 100) * (bins - 1))));
+    hist[bin]++;
+  }
+
+  const cdf = new Uint32Array(bins);
+  cdf[0] = hist[0];
+  let cdfMin = 0;
+  let foundMin = false;
+
+  for (let i = 1; i < bins; i++) {
+    cdf[i] = cdf[i - 1] + hist[i];
+    if (!foundMin && hist[i] > 0) {
+      cdfMin = cdf[i];
+      foundMin = true;
+    }
+  }
+
+  const total = brightness.length;
+  if (!foundMin || cdfMin === total) return;
+
+  const scale = 100 / (total - cdfMin);
+  for (let i = 0; i < brightness.length; i++) {
+    const bin = Math.min(bins - 1, Math.max(0, Math.floor((brightness[i] / 100) * (bins - 1))));
+    brightness[i] = (cdf[bin] - cdfMin) * scale;
+  }
+};
+
 const processMonochrome = (
   imageData: ImageData,
   config: WorkerConfig
 ): string => {
   const charset = (CHARACTER_SETS[config.selectedCharset] ?? CHARACTER_SETS['STANDARD']).characters;
-  const { asciiWidth } = config;
+  const { asciiWidth, contrast, intensity, noise, histogramEqualization } = config;
   const { data, width: imgWidth, height: imgHeight } = imageData;
+
+  if (noise > 0) {
+    for (let i = 0; i < data.length; i += 4) {
+      const n = Math.random() * noise * 2 - noise;
+      data[i] += n;
+      data[i + 1] += n;
+      data[i + 2] += n;
+    }
+  }
 
   const cellWidth = Math.floor(imgWidth / asciiWidth);
   const cellHeight = Math.floor(cellWidth * 2);
@@ -386,24 +415,15 @@ const processMonochrome = (
     tempCorrR = 1.08; tempCorrB = 0.92;
   }
 
-  const srgbToLinear = (c: number) => {
-    const s = c / 255;
-    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-  };
-
-  const rgbToLabL = (r: number, g: number, b: number): number => {
+  const rgbToLuminance = (r: number, g: number, b: number): number => {
     r = Math.min(255, r * wbR * tempCorrR);
     g = Math.min(255, g * wbG * tempCorrG);
     b = Math.min(255, b * wbB * tempCorrB);
-    const lr = srgbToLinear(r);
-    const lg = srgbToLinear(g);
-    const lb = srgbToLinear(b);
-    const y = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
-    const fy = y > 0.008856 ? Math.cbrt(y) : (903.3 * y + 16) / 116;
-    return y > 0.008856 ? 116 * fy - 16 : 903.3 * y;
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    return lum * 100 / 255;
   };
 
-  // First pass: per-cell average LAB lightness
+  // First pass: per-cell average luminosity
   const cellBrightness = new Float32Array(asciiWidth * height);
 
   const webglAvailable = useWebGL();
@@ -438,7 +458,7 @@ const processMonochrome = (
           for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
             for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
               const index = (cy * imgWidth + cx) * 4;
-              totalL += rgbToLabL(data[index], data[index + 1], data[index + 2]);
+              totalL += rgbToLuminance(data[index], data[index + 1], data[index + 2]);
               pixelCount++;
             }
           }
@@ -455,7 +475,7 @@ const processMonochrome = (
         for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
           for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
             const index = (cy * imgWidth + cx) * 4;
-            totalL += rgbToLabL(data[index], data[index + 1], data[index + 2]);
+            totalL += rgbToLuminance(data[index], data[index + 1], data[index + 2]);
             pixelCount++;
           }
         }
@@ -464,8 +484,21 @@ const processMonochrome = (
     }
   }
 
+  if (histogramEqualization) {
+    applyHistogramEqualization(cellBrightness);
+  }
+
+  // Apply contrast and intensity multiplier
+  for (let i = 0; i < cellBrightness.length; i++) {
+    const normalized = cellBrightness[i] / 100;
+    const adjusted = (normalized - 0.5) * contrast + 0.5;
+    const clamped = Math.max(0, Math.min(1, adjusted));
+    cellBrightness[i] = clamped * 100 * intensity;
+  }
+
   // Second pass: unsharp masking + character mapping
   const sharpenK = 0.5;
+  const step = 100 / (charset.length - 1);
 
   const parts: string[] = [];
   for (let y = 0; y < height; y++) {
@@ -486,7 +519,9 @@ const processMonochrome = (
       const blurred = blurSum / blurCount;
       const sharpened = Math.max(0, Math.min(100, original + sharpenK * (original - blurred)));
 
-      const charIndex = Math.floor((sharpened / 100) * (charset.length - 1));
+      const bayerThreshold = (BAYER_MATRIX_4X4[y % 4][x % 4] / 16 - 0.5);
+      const dithered = sharpened + bayerThreshold * step;
+      const charIndex = Math.max(0, Math.min(charset.length - 1, Math.floor((dithered / 100) * (charset.length - 1))));
       const char = charset[charIndex];
       parts.push(char);
     }
@@ -501,7 +536,7 @@ const processColor = (
   config: WorkerConfig
 ): string => {
   const charset = (CHARACTER_SETS[config.selectedCharset] ?? CHARACTER_SETS['STANDARD']).characters;
-  const { asciiWidth } = config;
+  const { asciiWidth, contrast, intensity, histogramEqualization } = config;
   const { data, width: imgWidth, height: imgHeight } = imageData;
 
   const cellWidth = Math.floor(imgWidth / asciiWidth);
@@ -544,7 +579,20 @@ const processColor = (
     }
   }
 
+  if (histogramEqualization) {
+    applyHistogramEqualization(cellBrightness);
+  }
+
+  // Apply contrast and intensity multiplier
+  for (let i = 0; i < cellBrightness.length; i++) {
+    const normalized = cellBrightness[i] / 100;
+    const adjusted = (normalized - 0.5) * contrast + 0.5;
+    const clamped = Math.max(0, Math.min(1, adjusted));
+    cellBrightness[i] = clamped * 100 * intensity;
+  }
+
   const sharpenK = 0.5;
+  const step = 100 / (charset.length - 1);
   const parts: string[] = [];
 
   for (let y = 0; y < height; y++) {
@@ -567,7 +615,9 @@ const processColor = (
         }
       }
       const sharpened = Math.max(0, Math.min(100, original + sharpenK * (original - blurSum / blurCount)));
-      const charIndex = Math.floor((sharpened / 100) * (charset.length - 1));
+      const bayerThreshold = (BAYER_MATRIX_4X4[y % 4][x % 4] / 16 - 0.5);
+      const dithered = sharpened + bayerThreshold * step;
+      const charIndex = Math.max(0, Math.min(charset.length - 1, Math.floor((dithered / 100) * (charset.length - 1))));
       const char = charset[charIndex];
 
       const colorK = 0.8;
@@ -606,61 +656,6 @@ const processColor = (
   return parts.join('');
 };
 
-const processEmoji = (
-  imageData: ImageData,
-  config: WorkerConfig,
-): { cols: number; rows: string[] } => {
-  const { asciiWidth } = config;
-  const { data, width: imgWidth, height: imgHeight } = imageData;
-
-  const cellSize = Math.floor(imgWidth / asciiWidth);
-  const height = Math.floor(imgHeight / cellSize);
-
-  // White balance: Gray World algorithm, sample every 4th pixel
-  const totalPixels = imgWidth * imgHeight;
-  let sumR = 0, sumG = 0, sumB = 0;
-  for (let i = 0; i < data.length; i += 16) {
-    sumR += data[i]; sumG += data[i + 1]; sumB += data[i + 2];
-  }
-  const sampleCount = Math.ceil(totalPixels / 4);
-  const grayMean = (sumR + sumG + sumB) / (3 * sampleCount);
-  const wbR = sumR > 0 ? grayMean / (sumR / sampleCount) : 1;
-  const wbG = sumG > 0 ? grayMean / (sumG / sampleCount) : 1;
-  const wbB = sumB > 0 ? grayMean / (sumB / sampleCount) : 1;
-
-  const rows: string[] = [];
-  for (let y = 0; y < height; y++) {
-    const rowEmojis: string[] = [];
-    for (let x = 0; x < asciiWidth; x++) {
-      let totalR = 0, totalG = 0, totalB = 0, pixelCount = 0;
-      for (let cy = y * cellSize; cy < y * cellSize + cellSize; cy++) {
-        for (let cx = x * cellSize; cx < x * cellSize + cellSize; cx++) {
-          const i = (cy * imgWidth + cx) * 4;
-          totalR += data[i];
-          totalG += data[i + 1];
-          totalB += data[i + 2];
-          pixelCount++;
-        }
-      }
-      const r = Math.min(255, (totalR / pixelCount) * wbR);
-      const g = Math.min(255, (totalG / pixelCount) * wbG);
-      const b = Math.min(255, (totalB / pixelCount) * wbB);
-
-      let best = EMOJI_COLOR_PALETTE[0];
-      let bestDist = Infinity;
-      for (const entry of EMOJI_COLOR_PALETTE) {
-        const dr = r - entry.r, dg = g - entry.g, db = b - entry.b;
-        const dist = dr * dr + dg * dg + db * db;
-        if (dist < bestDist) { bestDist = dist; best = entry; }
-      }
-      rowEmojis.push(best.emoji);
-    }
-    rows.push(rowEmojis.join(''));
-  }
-
-  return { cols: asciiWidth, rows };
-};
-
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
 ctx.onmessage = (e: MessageEvent<WorkerInput>) => {
@@ -673,9 +668,6 @@ ctx.onmessage = (e: MessageEvent<WorkerInput>) => {
       result.asciiOutput = processMonochrome(imageData, config);
     } else if (config.colorMode === 'color') {
       result.coloredAsciiOutput = processColor(imageData, config);
-    } else if (config.colorMode === 'emoji') {
-      const { cols, rows } = processEmoji(imageData, config);
-      result.emojiOutput = { cols, rows };
     }
 
     ctx.postMessage(result);

@@ -3,7 +3,7 @@
 > **Auto-generated. Do not edit manually.**
 > Updated automatically after every Claude Code session via the `Stop` and `SubagentStop` hooks.
 > To regenerate manually: `bash scripts/generate-tree.sh`
-> Last generated: 2026-03-30 03:27:34 UTC
+> Last generated: 2026-04-26 13:12:17 UTC
 
 ---
 
@@ -18,12 +18,12 @@
 │   │   │   ├── next-task.md
 │   │   │   └── smart-workflow.md
 │   │   └── wrap-up.md
-│   ├── session-changed
 │   ├── settings.json
 │   └── settings.local.json
 ├── .taskmaster
 │   ├── docs
-│   │   └── prd.md
+│   │   ├── prd.md
+│   │   └── v2-depth-improvement.md
 │   ├── reports
 │   ├── tasks
 │   │   └── tasks.json
@@ -34,16 +34,18 @@
 │   ├── features
 │   │   ├── _feature-directory-index-template.md
 │   │   ├── _feature-template.md
+│   │   ├── depth-improvement.md
 │   │   ├── image-conversion.md
 │   │   ├── rendering-modes.md
 │   │   ├── screenshot.md
 │   │   └── webcam-ascii.md
-│   └── infra
-│       ├── changelog.md
-│       ├── decisions.md
-│       ├── deployment.md
-│       ├── file-tree.md
-│       └── patterns.md
+│   ├── infra
+│   │   ├── changelog.md
+│   │   ├── decisions.md
+│   │   ├── deployment.md
+│   │   ├── file-tree.md
+│   │   └── patterns.md
+│   └── .DS_Store
 ├── public
 ├── scripts
 │   ├── generate-tree.sh
@@ -62,13 +64,11 @@
 │   ├── worker
 │   │   └── ascii-worker.ts
 │   ├── .DS_Store
-│   ├── EmojiGrid.tsx
 │   ├── index.css
 │   ├── main.tsx
 │   └── vite-env.d.ts
 ├── .DS_Store
 ├── .gitignore
-├── .windsurfrules
 ├── CLAUDE.md
 ├── index.html
 ├── package.json

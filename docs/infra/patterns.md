@@ -298,7 +298,7 @@ Exporting the ASCII output as a PNG requires rendering it to a canvas at high re
 `takeScreenshot` — any time ASCII output needs to be rendered to a PNG.
 
 **When NOT to use it:**
-Live rendering — that uses the DOM directly (`<pre>`, `<span>`, `EmojiGrid`).
+Live rendering — that uses the DOM directly (`<pre>`, `<span>`).
 
 **Implementation:**
 
@@ -342,7 +342,6 @@ takeScreenshot: async () => {
 
 **Key things to note:**
 - `ctx.textBaseline = 'top'` is required. The default (`'alphabetic'`) makes the y coordinate the baseline, so characters render above their row position.
-- For emoji mode, spread each row with `[...rows[y]]` before iterating — emoji strings contain multi-codepoint sequences (e.g. skin tone modifiers) that split incorrectly with index access.
 - Always `URL.revokeObjectURL` after the download — object URLs are not garbage collected automatically.
 - Always use `<a download>` rather than `navigator.share` — the share sheet on macOS/iOS prompts to add to Photos or AirDrop, not to save a file.
 - Any loading state flag (e.g. `screenshotLoading`) must be reset on **every** early-return path, not just in the happy path. `toBlob` is callback-based, so the reset belongs at the top of the callback — not after the `toBlob` call site.

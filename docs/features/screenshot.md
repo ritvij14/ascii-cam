@@ -7,7 +7,7 @@
 
 ## Overview
 
-Users can export the current ASCII output as a PNG file. The feature works across all three rendering modes (monochrome, color, emoji) and is available on both the Webcam and Image tabs. The button label and loading state are context-aware.
+Users can export the current ASCII output as a PNG file. The feature works across both rendering modes (monochrome and color) and is available on both the Webcam and Image tabs. The button label and loading state are context-aware.
 
 ---
 
@@ -23,7 +23,7 @@ Users can export the current ASCII output as a PNG file. The feature works acros
 
 ### Webcam tab (`WebcamPage.tsx`)
 - Button label: **"Take Screenshot"**
-- Visible only when `hasOutput` is true (i.e. there is ASCII/color/emoji output to export)
+- Visible only when `hasOutput` is true (i.e. there is ASCII or color output to export)
 
 ### Image tab (`ImagePage.tsx`)
 - Button label: **"Download Image"**
@@ -40,7 +40,6 @@ Lives in `src/store/index.ts`. Steps:
 1. Sets `screenshotLoading: true`
 2. Creates an off-screen `<canvas>` (never added to the DOM)
 3. Branches on `colorMode`:
-   - **emoji** — draws each emoji cell at `20 × SCALE` px using `ctx.fillText`
    - **color** — parses `coloredAsciiOutput` HTML spans with a regex, draws each character in its color
    - **monochrome** — draws plain text lines in `asciiColor`
 4. Calls `canvas.toBlob()` — inside the callback, sets `screenshotLoading: false`, then triggers a download via a temporary `<a download>` element

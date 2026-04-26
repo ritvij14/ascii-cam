@@ -25,11 +25,17 @@ interface AppState {
   // ASCII State
   asciiOutput: string;
   coloredAsciiOutput: string;
-  emojiOutput: { cols: number; rows: string[] };
   asciiWidth: number;
   selectedCharset: string;
   asciiColor: string;
-  colorMode: 'monochrome' | 'color' | 'emoji';
+  colorMode: 'monochrome' | 'color';
+
+  // Depth control state
+  fontSize: number;
+  noise: number;
+  intensity: number;
+  contrast: number;
+  histogramEqualization: boolean;
 
   // Image tab
   uploadedImage: string | null; // base64 data URL
@@ -66,11 +72,13 @@ interface AppActions {
   clearOutput: () => void;
   updateAsciiOutput: (imageData: ImageData) => void;
   updateColorAsciiOutput: (imageData: ImageData) => void;
-  updateEmojiOutput: (imageData: ImageData) => void;
   takeScreenshot: () => Promise<void>;
 }
 
 type AppStore = AppState & AppActions;
+
+const computeAsciiWidth = (sourceWidth: number, fontSize: number): number =>
+  Math.max(1, Math.floor(sourceWidth / (fontSize * 0.6)));
 
 export const useStore = create<AppStore>((set, get) => {
   // Single-slot segmentation queue: Stage 1 writes, Stage 2 reads.
@@ -90,8 +98,6 @@ export const useStore = create<AppStore>((set, get) => {
             set({ asciiOutput: e.data.asciiOutput, workerBusy: false });
           } else if (e.data.coloredAsciiOutput !== undefined) {
             set({ coloredAsciiOutput: e.data.coloredAsciiOutput, workerBusy: false });
-          } else if (e.data.emojiOutput !== undefined) {
-            set({ emojiOutput: e.data.emojiOutput, workerBusy: false });
           }
           const { perfMetrics } = get();
           if (perfMetrics) set({
@@ -121,11 +127,18 @@ export const useStore = create<AppStore>((set, get) => {
   segAnimationFrameId: null,
   asciiOutput: '',
   coloredAsciiOutput: '',
-  emojiOutput: { cols: 0, rows: [] },
   asciiWidth: 120,
   selectedCharset: DEFAULT_CHARSET,
   asciiColor: '#00ff00',
   colorMode: 'monochrome',
+
+  // Depth control defaults
+  fontSize: 12,
+  noise: 0,
+  intensity: 1.0,
+  contrast: 1.0,
+  histogramEqualization: true,
+
   uploadedImage: null,
   asciiWorker: null,
   workerBusy: false,
@@ -134,7 +147,13 @@ export const useStore = create<AppStore>((set, get) => {
   screenshotLoading: false,
 
   // Actions
-  updateAppState: (partialState) => set(partialState),
+  updateAppState: (partialState) => {
+    if ('fontSize' in partialState) {
+      set({ ...partialState, asciiOutput: '', coloredAsciiOutput: '' });
+    } else {
+      set(partialState);
+    }
+  },
 
   processImage: async (dataUrl?: string) => {
     const { canvasRef, maskCanvasRef, colorMode } = get();
@@ -154,8 +173,6 @@ export const useStore = create<AppStore>((set, get) => {
 
     if (colorMode === 'color') {
       get().updateColorAsciiOutput(imageData);
-    } else if (colorMode === 'emoji') {
-      get().updateEmojiOutput(imageData);
     } else {
       // monochrome: lazy-init segmenter then run segmentation
       if (!get().segmenter) {
@@ -192,34 +209,25 @@ export const useStore = create<AppStore>((set, get) => {
   },
 
   updateAsciiOutput: (imageData) => {
-    const { workerBusy, asciiWidth, selectedCharset, asciiColor } = get();
+    const { workerBusy, fontSize, selectedCharset, asciiColor, contrast, intensity, noise, histogramEqualization } = get();
     if (workerBusy) return;
-    set({ workerBusy: true });
+    const asciiWidth = computeAsciiWidth(imageData.width, fontSize);
+    set({ asciiWidth, workerBusy: true });
     workerPostTime = performance.now();
     getWorker().postMessage(
-      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'monochrome', asciiColor } },
+      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'monochrome', asciiColor, contrast, intensity, noise, histogramEqualization } },
       [imageData.data.buffer]
     );
   },
 
   updateColorAsciiOutput: (imageData) => {
-    const { workerBusy, asciiWidth, selectedCharset, asciiColor } = get();
+    const { workerBusy, fontSize, selectedCharset, asciiColor, contrast, intensity, noise, histogramEqualization } = get();
     if (workerBusy) return;
-    set({ workerBusy: true });
+    const asciiWidth = computeAsciiWidth(imageData.width, fontSize);
+    set({ asciiWidth, workerBusy: true });
     workerPostTime = performance.now();
     getWorker().postMessage(
-      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'color', asciiColor } },
-      [imageData.data.buffer]
-    );
-  },
-
-  updateEmojiOutput: (imageData) => {
-    const { workerBusy, asciiWidth, selectedCharset, asciiColor } = get();
-    if (workerBusy) return;
-    set({ workerBusy: true });
-    workerPostTime = performance.now();
-    getWorker().postMessage(
-      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'emoji', asciiColor } },
+      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'color', asciiColor, contrast, intensity, noise, histogramEqualization } },
       [imageData.data.buffer]
     );
   },
@@ -265,7 +273,6 @@ export const useStore = create<AppStore>((set, get) => {
 
     let lastFrameTime = 0;
     const targetFrameMs = 33;
-    let aspectChecked = false;
 
     // Stage 1: pure video capture. Never blocks on segmentation.
     const captureFrame = (timestamp: number) => {
@@ -275,13 +282,6 @@ export const useStore = create<AppStore>((set, get) => {
       }
 
       if (videoRef.readyState === videoRef.HAVE_ENOUGH_DATA) {
-        if (!aspectChecked) {
-          aspectChecked = true;
-          if (videoRef.videoHeight > videoRef.videoWidth) {
-            set({ asciiWidth: 80 });
-          }
-        }
-
         const frameStart = performance.now();
 
         canvasRef.width = videoRef.videoWidth;
@@ -296,11 +296,9 @@ export const useStore = create<AppStore>((set, get) => {
 
         const imageData = ctx.getImageData(0, 0, canvasRef.width, canvasRef.height);
 
-        const { colorMode } = get();
+        const { colorMode, fontSize } = get();
         if (colorMode === 'color') {
           get().updateColorAsciiOutput(imageData);
-        } else if (colorMode === 'emoji') {
-          get().updateEmojiOutput(imageData);
         } else {
           // Monochrome: push frame to seg queue (Stage 2 picks it up).
           // Overwrite any queued frame — Stage 2 always gets the newest.
@@ -311,7 +309,8 @@ export const useStore = create<AppStore>((set, get) => {
         const frameInterval = lastFrameTime > 0 ? timestamp - lastFrameTime : frameTime;
         lastFrameTime = timestamp;
 
-        const { asciiWidth, perfMetrics } = get();
+        const asciiWidth = computeAsciiWidth(videoRef.videoWidth, fontSize);
+        const { perfMetrics } = get();
         set({
           perfMetrics: {
             fps: Math.round(1000 / Math.max(frameInterval, 1)),
@@ -381,8 +380,11 @@ export const useStore = create<AppStore>((set, get) => {
           processedImageData = masked;
         } catch { /* skip mask on error, use unmasked frame */ }
 
-        get().updateAsciiOutput(processedImageData);
-        segBusy = false;
+        try {
+          get().updateAsciiOutput(processedImageData);
+        } finally {
+          segBusy = false;
+        }
 
         const segTime = performance.now() - segStart;
         const { perfMetrics } = get();
@@ -442,7 +444,7 @@ export const useStore = create<AppStore>((set, get) => {
   },
 
   takeScreenshot: async () => {
-    const { colorMode, asciiOutput, coloredAsciiOutput, emojiOutput, asciiColor, selectedCharset } = get();
+    const { colorMode, asciiOutput, coloredAsciiOutput, asciiColor, selectedCharset } = get();
 
     set({ screenshotLoading: true });
     const canvas = document.createElement('canvas');
@@ -455,23 +457,7 @@ export const useStore = create<AppStore>((set, get) => {
     const CHAR_H = FONT_SIZE;
     const PAD = 24 * SCALE;
 
-    if (colorMode === 'emoji') {
-      const { cols, rows } = emojiOutput;
-      if (!rows.length) { set({ screenshotLoading: false }); return; }
-      const EMOJI_SIZE = 20 * SCALE;
-      canvas.width = cols * EMOJI_SIZE + PAD * 2;
-      canvas.height = rows.length * EMOJI_SIZE + PAD * 2;
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.font = `${EMOJI_SIZE * 0.9}px serif`;
-      ctx.textBaseline = 'top';
-      for (let y = 0; y < rows.length; y++) {
-        const chars = [...rows[y]]; // handle multi-codepoint emoji
-        for (let x = 0; x < chars.length; x++) {
-          ctx.fillText(chars[x], PAD + x * EMOJI_SIZE, PAD + y * EMOJI_SIZE);
-        }
-      }
-    } else if (colorMode === 'color') {
+    if (colorMode === 'color') {
       // Parse colored HTML spans into (char, color) pairs
       const parsed: { char: string; color: string }[][] = [];
       const spanRe = /<span style="color:(#[0-9a-f]{6})">(.)<\/span>/g;
@@ -530,7 +516,7 @@ export const useStore = create<AppStore>((set, get) => {
   },
 
   clearOutput: () => {
-    set({ asciiOutput: '', coloredAsciiOutput: '', emojiOutput: { cols: 0, rows: [] }, uploadedImage: null });
+    set({ asciiOutput: '', coloredAsciiOutput: '', uploadedImage: null });
   },
 
   stopWebcam: () => {

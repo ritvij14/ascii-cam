@@ -46,7 +46,7 @@ git push origin main
 - `pnpm run build` completes without TypeScript errors
 - `pnpm run preview` — verify the app loads and webcam works in the preview build
 - MediaPipe segmentation initializes correctly (check browser console for WASM errors)
-- All three rendering modes (monochrome, color, emoji) produce output
+- Both rendering modes (monochrome, color) produce output
 - Screenshot export works (download on desktop)
 
 ---
@@ -78,7 +78,7 @@ Code splitting is configured in `vite.config.ts` via `build.rollupOptions.output
 |---|---|---|
 | `mediapipe-*.js` | `@mediapipe/selfie_segmentation` | First webcam start (dynamic import in `initSegmentation`) |
 | `router-*.js` | `@tanstack/react-router` | Eager (loaded with app) |
-| `ascii-worker-*.js` | ASCII/emoji/color processing worker | First frame processed (lazy Worker init) |
+| `ascii-worker-*.js` | ASCII/color processing worker | First frame processed (lazy Worker init) |
 | `react-colorful` | HexColorPicker | First time color picker is opened (React.lazy) |
 
 **Target:** initial bundle < 200KB gzipped (achieved — main chunk is ~5 KB gzipped).

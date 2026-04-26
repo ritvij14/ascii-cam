@@ -1,8 +1,197 @@
 # Changelog
 
+---
+
+
+# Changelog
+
 > **Session-by-session record of significant changes.**
 > Append a new entry at the top after each session that modifies files.
 > Format: date, one-line summary, changed files, motivation, implementation notes.
+
+---
+
+## 2026-04-25 — Fix ASCII display centering drift by replacing flexbox with absolute positioning
+
+**Changed:** `src/components/AsciiDisplay.tsx`, `docs/features/rendering-modes.md`
+
+**Why:** When `fontSize` changed, the scaled ASCII output was sometimes visibly shifted left or right instead of perfectly centered. This happened because `transform: scale()` creates a visual bounding box larger than the element's layout box, and flexbox centers the layout box — not the visual content. At different scale factors the mismatch caused a persistent horizontal offset.
+
+**How:**
+- Replaced flexbox centering (`flex items-center justify-center`) on the `<pre>` with `relative` positioning.
+- The inner content span is now `absolute top-1/2 left-1/2` with `transform: translate(-50%, -50%) scale(N)`. The `translate(-50%, -50%)` is mathematically exact: it centers the element by shifting it back by half its own size, regardless of the scale factor. This eliminates the drift that flexbox centering caused.
+- Added `requestAnimationFrame` batching inside the `ResizeObserver` callback so rapid scale re-calculations during font size changes don't thrash the layout.
+
+---
+
+## 2026-04-25 — Make ASCII `<pre>` fill its container to avoid container resizing on control changes
+
+**Changed:** `src/components/AsciiDisplay.tsx`, `src/components/WebcamPage.tsx`, `src/components/ImagePage.tsx`, `docs/features/rendering-modes.md`
+
+**Why:** When users changed `fontSize`, `intensity`, or `contrast`, the `<pre>` tag sized itself to its content, causing the display container to resize and the layout to shift. The user wanted a fixed-size display that fills the available space regardless of the ASCII grid dimensions.
+
+**How:**
+- `AsciiDisplay.tsx` — Added `w-full h-full` to the `<pre>` tag. Removed the `--cols`/`--rows` CSS variables and the dead `asciiWidth` / `React` imports that computed them. The `<pre>` now always stretches to its parent's full dimensions.
+- `WebcamPage.tsx` — Changed the ASCII wrapper from `absolute inset-0 flex items-center justify-center p-4` to `absolute inset-0 p-4`, removing the flex centering so the `<pre>` fills the space.
+- `ImagePage.tsx` — Same change on the split-pane ASCII cell wrapper: removed `flex items-center justify-center` so the `<pre>` fills the cell.
+
+---
+
+## 2026-04-25 — Add centered zoom-to-fit scaling to ASCII display
+
+**Changed:** `src/components/AsciiDisplay.tsx`, `docs/features/rendering-modes.md`
+
+**Why:** Making the `<pre>` full-size left the ASCII text sitting in the top-left corner at its natural font size. The user wanted the output centered and scaled up to fill as much of the viewport as possible, like `object-fit: contain`.
+
+**How:**
+- Added a `ResizeObserver` that watches both the `<pre>` container and an inner `<span>` wrapping the ASCII text. On every resize it computes `scale = min(containerW / contentW, containerH / contentH)`.
+- The inner span applies `transform: scale(N)` with `transform-origin: center` so the art is centered and fills the container without distortion.
+- The `<pre>` uses `display: flex; align-items: center; justify-content: center` and `overflow: hidden` so the scaled content is centered and clipped neatly.
+- Monochrome and color modes both use the same inner-span structure; color mode uses `dangerouslySetInnerHTML` on the span, monochrome renders it as a text child.
+
+---
+
+## 2026-04-25 — Restructure ModeControls into horizontal bar with upward settings dropdown
+
+**Changed:** `src/components/ModeControls.tsx`, `src/components/WebcamPage.tsx`, `src/components/ImagePage.tsx`, `docs/features/rendering-modes.md`
+
+**Why:** User requested a cleaner UI where all configuration controls are in a horizontal bar rather than a vertical stack. On responsive/mobile view, the bar should wrap gracefully while secondary controls (sliders, color picker, histogram EQ) are tucked into an upward-opening dropdown toggled by a settings button.
+
+**How:**
+- `ModeControls.tsx` — Restructured from a fragment of vertical rows into a `relative` container with two parts:
+  1. **Horizontal bar** (`flex items-center gap-2 flex-wrap justify-center`): mode toggle, charset picker, and a ⚙️ settings button. Vertical dividers (`w-px h-6`) separate groups on desktop.
+  2. **Upward dropdown** (`absolute bottom-full left-1/2 -translate-x-1/2 mb-2`): contains color swatches + `HexColorPicker` (monochrome only), FONT/NOISE/INTENSITY/CONTRAST sliders, and HISTOGRAM EQ toggle. Sliders use `flex-1` so they fill the dropdown width.
+- Removed `showColorPicker` / `setShowColorPicker` props from `ModeControlsProps`; state is now internal. Removed the standalone color circle button from `WebcamPage.tsx` and `ImagePage.tsx` — color selection now lives inside the settings dropdown.
+- The bar uses `flex-wrap` so on narrow screens it naturally wraps to multiple lines instead of overflowing horizontally.
+
+---
+
+## 2026-04-25 — Replace gamma with true contrast; fix segBusy race condition; apply contrast/intensity in color mode
+
+**Changed:** `src/worker/ascii-worker.ts`, `src/store/index.ts`, `docs/features/rendering-modes.md`
+
+**Why:** The contrast slider was labeled "CONTRAST" but implemented as `Math.pow(normalized, contrast)` — a gamma curve that crushes midtones toward black. When users increased contrast above 1.0, the background would disappear into crushed blacks and the visible ASCII mass would perceptually "shift left." This was reported as a bug where "changing contrast completely breaks the view."
+
+**How:**
+1. **True contrast formula** — Replaced gamma (`Math.pow(x, c)`) with linear scaling around the midpoint: `(normalized - 0.5) * contrast + 0.5`. Values above 1.0 push midtones symmetrically toward black and white extremes; values below 1.0 compress toward the midpoint. Clamped to `[0, 1]` before scaling back to `[0, 100]`.
+2. **Applied to both modes** — The contrast and intensity post-processing block now runs in `processColor` as well as `processMonochrome`. Previously `processColor` ignored both sliders entirely.
+3. **Fixed segBusy race condition** — In `startSegmentationLoop`, if `updateAsciiOutput` returned early (because `workerBusy` was still `true`), `segBusy = false` never executed, permanently stalling the monochrome segmentation queue. Wrapped the call in `try/finally` so `segBusy` always resets.
+4. Updated `rendering-modes.md` Data Model table and both mode sections to document the new contrast behavior.
+
+---
+
+## 2026-04-25 — Add intensity and contrast sliders to ModeControls UI (Task 55)
+
+**Changed:** `src/components/ModeControls.tsx`, `src/components/ImagePage.tsx`, `docs/features/rendering-modes.md`
+
+**Why:** Task 55 — expose the `intensity` and `contrast` depth controls that already exist in the store and worker pipeline but had no UI. Users need a way to adjust brightness multiplier and gamma exponent in real-time to tune the ASCII output.
+
+**How:**
+- Added `intensity` and `contrast` to `ModeControls` component state reads, and two new range inputs (0.5–2.0, step 0.1) with `.toFixed(1)` readouts. Labels use the same "FONT"/"NOISE" pattern: "INTENSITY" and "CONTRAST".
+- Extended `ModeControlsProps` with optional `onIntensityChange` and `onContrastChange` callbacks, mirroring the existing `onFontSizeChange` pattern. Both sliders invoke their respective callback when changed.
+- Wired `onIntensityChange={handleReprocess}` and `onContrastChange={handleReprocess}` in `ImagePage` so uploaded images are reconverted when either slider changes.
+- Updated `rendering-modes.md` Data Model table to include `noise`, `intensity`, `contrast`, and `histogramEqualization` fields. Updated Dependencies section to list all ModeControls UI elements.
+
+---
+
+## 2026-04-25 — Implement font size control with grid dimensions (Task 54)
+
+**Changed:** `src/store/index.ts`, `src/components/AsciiDisplay.tsx`, `src/components/ModeControls.tsx`, `src/components/ImagePage.tsx`, `docs/features/rendering-modes.md`, `docs/features/webcam-ascii.md`, `docs/features/depth-improvement.md`
+
+**Why:** Task 54 — add a font size slider so users can control ASCII grid density. Smaller fonts produce more columns and finer detail; larger fonts produce fewer columns and coarser detail. Previously `asciiWidth` was fixed at 120 (or 80 for portrait), and the display font size was auto-computed via CSS `clamp()` to fit the viewport. This gave users no control over detail level.
+
+**How:**
+- Added `computeAsciiWidth(sourceWidth, fontSize)` helper in the store: `floor(sourceWidth / (fontSize * 0.6))`. This derives the column count from the source image/video width and the user's chosen font size.
+- Updated `updateAsciiOutput` and `updateColorAsciiOutput` to compute `asciiWidth` from `imageData.width` and `fontSize` before posting to the worker, and update Zustand state so `AsciiDisplay` receives the correct column count.
+- Removed the one-time portrait-mode `asciiWidth: 80` override from `startRenderLoop`. Portrait video naturally produces fewer columns because `videoWidth` is smaller.
+- Updated `startRenderLoop` perf metrics to compute `asciiWidth` directly from `videoWidth` and `fontSize` for accurate grid size reporting.
+- Changed `AsciiDisplay` to render at the fixed `fontSize` from store (`fontSize: 'Npx'`) instead of the previous `clamp()` expression that auto-fitted to the viewport.
+- Added a "FONT" slider to `ModeControls` (range 6–20px, default 12) with a numeric readout (`12px`). Added `onFontSizeChange` optional prop so `ImagePage` can trigger reprocessing when the slider changes.
+- Wired `onFontSizeChange={handleReprocess}` in `ImagePage` so uploaded images are reconverted when font size changes.
+- Updated `rendering-modes.md` Data Model table to include `fontSize` and `asciiWidth`, and updated Component Rendering section to document fixed font size + dynamic grid width.
+- Updated `webcam-ascii.md` to replace the portrait check section with a "Grid dimension computation" section, and updated the cell dimensions docs to mention dynamic `asciiWidth`.
+- Updated `depth-improvement.md` to mark Task 54 as completed.
+
+---
+
+## 2026-04-25 — Implement histogram equalization toggle (Task 53)
+
+**Changed:** `src/worker/ascii-worker.ts`, `src/store/index.ts`, `src/components/ModeControls.tsx`, `docs/features/rendering-modes.md`, `docs/features/depth-improvement.md`
+
+**Why:** Task 53 — add histogram equalization to enhance detail visibility in shadows and highlights. Webcam images often have compressed dynamic range, causing facial features to blend into the same brightness bucket and lose detail in the ASCII output.
+
+**How:**
+- Added `histogramEqualization: boolean` to `WorkerConfig` interface and destructured it in both `processMonochrome` and `processColor`.
+- Implemented `applyHistogramEqualization(brightness: Float32Array)` using a 256-bin histogram + CDF approach. Maps each brightness value through the cumulative distribution to spread the full [0, 100] range evenly across the image.
+- Applied equalization to `cellBrightness` after cell-averaging and before gamma/contrast adjustments in both monochrome and color pipelines. This ensures the character mapping (which depends on brightness) uses the full charset range.
+- Updated `updateAsciiOutput` and `updateColorAsciiOutput` in the store to pass `histogramEqualization` through the worker config.
+- Added a toggle button in `ModeControls.tsx` labeled "HISTOGRAM EQ" that switches between white active and gray inactive styling, consistent with the existing mode/charset buttons. Default is ON (`true`).
+- Updated `rendering-modes.md` to include histogram equalization in the monochrome pipeline description.
+- Updated `depth-improvement.md` to mark Task 53 as completed.
+
+---
+
+---
+
+## 2026-04-25 — Implement ordered dithering (Bayer 4x4) (Task 52)
+
+**Changed:** `src/constants/character-sets.ts`, `src/worker/ascii-worker.ts`, `docs/features/webcam-ascii.md`, `docs/features/rendering-modes.md`
+
+**Why:** Task 52 — add Bayer 4x4 ordered dithering before character mapping for smoother gradients. The number of characters in any charset is limited (5–70), which creates visible banding in smooth gradient regions. Dithering spatially distributes quantization error, creating the illusion of intermediate brightness levels by alternating adjacent characters in a 4×4 tile pattern.
+
+**How:**
+- Added `BAYER_MATRIX_4X4` constant to `src/constants/character-sets.ts` with the classic 4×4 Bayer ordered dithering matrix.
+- Applied dithering in `processMonochrome` (worker) after unsharp masking and before character mapping. The threshold `(bayer[y % 4][x % 4] / 16 - 0.5) * step` is centered around zero and scaled to one character step (`100 / (charset.length - 1)`).
+- Applied the same dithering logic in `processColor` (worker) so both monochrome and color modes benefit from smoother gradients.
+- Clamped `charIndex` to `[0, charset.length - 1]` to prevent out-of-bounds indices at the extremes.
+- Updated `webcam-ascii.md` pipeline docs: inserted new Step 7 (Bayer dithering), renumbered character mapping to Step 8, updated last-updated date and dependencies.
+- Updated `rendering-modes.md` Color Mode docs to include the dithering formula and explanation, updated last-updated date and dependencies.
+
+---
+
+## 2026-04-25 — Implement noise control (Task 51)
+
+**Changed:** `src/worker/ascii-worker.ts`, `src/store/index.ts`, `src/components/ModeControls.tsx`, `docs/features/webcam-ascii.md`, `docs/features/depth-improvement.md`
+
+**Why:** Task 51 — add noise/grain effect to the grayscale (monochrome) pipeline. Film grain breaks banding in smooth gradient regions and adds texture to the ASCII output.
+
+**How:**
+- Added `noise: number` to `WorkerConfig` interface and destructured it in `processMonochrome`.
+- Applied `±noise` random offset to each pixel's R, G, B channels in-place on the `ImageData.data` buffer before white balance and LAB processing. `Uint8ClampedArray` auto-clamps to [0, 255].
+- Updated `updateAsciiOutput` and `updateColorAsciiOutput` in the store to pass `noise` through the worker config object.
+- Added a slider control in `ModeControls.tsx` labeled "NOISE" with range 0–50 and a numeric readout.
+- Updated `webcam-ascii.md` pipeline docs to include the new Step 2 (noise/grain) and renumbered subsequent steps.
+- Updated `depth-improvement.md` to mark Task 51 as completed.
+
+---
+
+## 2026-04-17 — Remove emoji mode from codebase and update all docs
+
+**Changed:** `src/store/index.ts`, `src/worker/ascii-worker.ts`, `src/constants/character-sets.ts`, `src/components/AsciiDisplay.tsx`, `src/components/ImagePage.tsx`, `src/components/ModeControls.tsx`, `src/components/WebcamPage.tsx`, `src/EmojiGrid.tsx` (deleted), `docs/features/rendering-modes.md`, `docs/features/screenshot.md`, `docs/features/webcam-ascii.md`, `docs/infra/decisions.md`, `docs/infra/deployment.md`, `docs/infra/patterns.md`
+
+**Why:** Emoji mode added ~300 LOC and bundle weight with limited user value while complicating every feature that needed a third branch. Two modes (monochrome + color) are sufficient.
+
+**How:** Deleted `EmojiGrid.tsx`, `emojiOutput` state, `updateEmojiOutput` action, `EMOJI_COLOR_PALETTE`, `rgbToNearestEmoji`, `processEmoji` worker function. Narrowed `colorMode` type to `'monochrome' | 'color'`. Updated all feature and infra docs to remove emoji references. Added ADR-010 (emoji removal decision) and revised ADR-004 to reflect two modes instead of three.
+
+---
+
+## 2026-04-16 — Create V2 PRD and add 20 tasks for depth improvement
+
+**Changed:** `.taskmaster/docs/v2-depth-improvement.md` (created), TaskMaster tasks 41-60 (added)
+
+**Why:** User wants to (1) remove emoji mode completely from code and docs, and (2) enhance ASCII depth to achieve near-photorealistic webcam representation with new controls.
+
+**How:** Created comprehensive PRD with: emoji removal requirements, grayscale pipeline improvements (luminosity conversion, dithering, histogram equalization), new controls (font size 6-20px, noise, intensity, contrast). Added 20 tasks to TaskMaster for implementation.
+
+---
+
+## 2026-04-16 — Update TaskMaster from CLI to MCP
+
+**Changed:** `.taskmaster/CLAUDE.md`, `CLAUDE.md`
+
+**Why:** TaskMaster was previously configured to use CLI commands. Updated to use MCP tools instead, matching the project template.
+
+**How:** Replaced CLI command reference in `.taskmaster/CLAUDE.md` with MCP tools table. Updated all CLI references in main `CLAUDE.md` to use MCP tool names (e.g., `task-master next` → `mcp__task-master-ai__next_task`). Added MCP connection check at session start. Already documented in project-template as ADR-002.
 
 ---
 
@@ -122,3 +311,11 @@
 **Why:** The ASCII conversion functions (`updateAsciiOutput`, `updateColorAsciiOutput`, `updateEmojiOutput`) run on the main thread and consume ~20–40ms per frame at 720p, leaving little budget for React rendering and input handling. Moving them off the main thread via a Web Worker unblocks the UI.
 
 **How:** Created `src/worker/ascii-worker.ts` with `WorkerInput` / `WorkerOutput` / `WorkerConfig` interfaces and a `ctx.onmessage` handler that dispatches by `colorMode`. Processing functions are stubs for now — actual logic migration is the next task. Added `worker: { format: 'es' }` to Vite config so the worker is bundled as a separate ES module chunk. Added `asciiWorker: Worker | null` to `AppState`, initialized with `new AsciiWorker()` on store creation. See ADR-007 in `decisions.md`.
+
+## 2026-04-16 — Generate V2 task breakdown: Depth Improvement & Emoji Removal
+
+**Changed:** .taskmaster/docs/v2-depth-improvement.md, docs/features/depth-improvement.md, .taskmaster/config.json, .taskmaster/state.json, docs/infra/file-tree.md
+
+**Why:** PRD submitted for ASCII Camera V2. Requires structured task breakdown for implementation.
+
+**How:** Analyzed codebase structure and generated 20 atomic tasks in 4 phases: (1) Emoji removal (tasks 1-14), (2) Depth infrastructure (tasks 15-16), (3) Grayscale+dithering (tasks 17-20). Each task has acceptance criteria, dependency ordering, pseudo-code, and testing strategy. Output as JSON via StructuredOutput, auto-imported into TaskMaster. Feature doc created at docs/features/depth-improvement.md.

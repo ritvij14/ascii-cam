@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useStore } from "../store";
 import AsciiDisplay from "./AsciiDisplay";
 import ModeControls from "./ModeControls";
@@ -29,15 +28,11 @@ const WebcamPage = () => {
   const screenshotLoading = useStore((state) => state.screenshotLoading);
   const perfMetrics = useStore((state) => state.perfMetrics);
   const showPerfOverlay = useStore((state) => state.showPerfOverlay);
-  const asciiColor = useStore((state) => state.asciiColor);
-  const colorMode = useStore((state) => state.colorMode);
   const hasOutput = useStore(
     (state) =>
       state.asciiOutput.length > 0 ||
-      state.coloredAsciiOutput.length > 0 ||
-      state.emojiOutput.rows.length > 0
+      state.coloredAsciiOutput.length > 0
   );
-  const [showColorPicker, setShowColorPicker] = useState(false);
 
   return (
     <div
@@ -57,29 +52,15 @@ const WebcamPage = () => {
         className="hidden"
       />
 
-      <div className="absolute inset-0 flex items-center justify-center p-4 overflow-hidden">
+      <div className="absolute inset-0 p-4 overflow-hidden">
         <AsciiDisplay />
       </div>
 
       {/* Bottom Controls */}
       <div className="absolute bottom-0 left-0 right-0 z-20 flex flex-col items-center gap-3 px-4 pb-[max(24px,env(safe-area-inset-bottom))]">
-        <ModeControls
-          showColorPicker={showColorPicker}
-          setShowColorPicker={setShowColorPicker}
-        />
+        <ModeControls />
 
         <div className="flex flex-wrap items-center justify-center gap-2">
-          {colorMode === "monochrome" && (
-            <button
-              onClick={() => setShowColorPicker(!showColorPicker)}
-              className="w-9 h-9 rounded-full border-2 transition hover:scale-110"
-              style={{
-                backgroundColor: asciiColor,
-                borderColor: showColorPicker ? "#ffffff" : "#4b5563",
-              }}
-              title="Color"
-            />
-          )}
           {webcamError && (
             <div className="bg-red-900/20 border border-red-500 text-red-400 px-3 py-2 rounded text-sm">
               {webcamError}

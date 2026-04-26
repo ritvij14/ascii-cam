@@ -1,9 +1,9 @@
 # Rendering Modes
 
-> **Feature doc for the three rendering modes: monochrome, color, and emoji.**
+> **Feature doc for the two rendering modes: monochrome and color.**
 > Covers mode switching, per-mode output pipeline, color post-processing, edge detection, and component rendering.
 > Status: Stable
-> Last updated: 2026-03-29
+> Last updated: 2026-04-25 (Fix font-size-change centering jump by clearing stale ASCII output)
 
 ---
 
@@ -14,7 +14,7 @@
 - [Mode Switching](#mode-switching)
 - [Monochrome Mode](#monochrome-mode)
 - [Color Mode](#color-mode) — LAB brightness, color unsharp mask, saturation boost
-- [Emoji Mode](#emoji-mode) — square cells, gray world WB, nearest-emoji lookup
+- [Character Sets](#character-sets)
 - [Character Sets](#character-sets)
 - [Component Rendering](#component-rendering)
 - [Dependencies](#dependencies)
@@ -23,15 +23,14 @@
 
 ## Overview
 
-The app supports three mutually exclusive rendering modes controlled by the `colorMode` field in the store. Each mode has its own output field, its own update function, and its own render component or path. They share no mutable state with each other.
+The app supports two mutually exclusive rendering modes controlled by the `colorMode` field in the store. Each mode has its own output field and update function. They share no mutable state with each other.
 
 | Mode | Output field | Update function | Renderer |
 |---|---|---|---|
 | `monochrome` | `asciiOutput: string` | `updateAsciiOutput` | `<pre>` with `asciiColor` fill |
 | `color` | `coloredAsciiOutput: string` | `updateColorAsciiOutput` | `<pre dangerouslySetInnerHTML>` |
-| `emoji` | `emojiOutput: { cols, rows }` | `updateEmojiOutput` | `EmojiGrid` component |
 
-The render loop (`startRenderLoop`) dispatches to the correct update function each frame based on `colorMode`. Segmentation (background removal) runs only in monochrome mode — color and emoji use the raw unmasked frame.
+The render loop (`startRenderLoop`) dispatches to the correct update function each frame based on `colorMode`. Segmentation (background removal) runs only in monochrome mode — color uses the raw unmasked frame.
 
 ---
 
@@ -41,12 +40,17 @@ Mode-related state fields in `AppState` (`src/store/index.ts:5`):
 
 | Field | Type | Description |
 |---|---|---|
-| `colorMode` | `'monochrome' \| 'color' \| 'emoji'` | Active rendering mode |
+| `colorMode` | `'monochrome' \| 'color'` | Active rendering mode |
 | `asciiOutput` | `string` | Newline-separated ASCII chars; written by `updateAsciiOutput` |
 | `coloredAsciiOutput` | `string` | HTML string of `<span style="color:#rrggbb">c</span>` per char |
-| `emojiOutput` | `{ cols: number; rows: string[] }` | Grid of emoji strings, one string per row |
 | `asciiColor` | `string` | Hex color used for monochrome text; default `#00ff00` |
-| `selectedCharset` | `string` | Key into `CHARACTER_SETS`; used by monochrome and color modes |
+| `selectedCharset` | `string` | Key into `CHARACTER_SETS`; used by both modes |
+| `fontSize` | `number` | Display font size in px (6–20); default `12`. Controls grid density via `asciiWidth` |
+| `asciiWidth` | `number` | Grid columns; computed dynamically from `fontSize` and source width |
+| `noise` | `number` | Gaussian noise added to source pixels (0–50); default `0` |
+| `intensity` | `number` | Post-processing brightness multiplier (0.5–2.0); default `1.0` |
+| `contrast` | `number` | Linear contrast scaling around midpoint (0.5–2.0); default `1.0`. At `1.0` it is neutral. Values > 1 stretch midtones outward; values < 1 compress toward the midpoint. |
+| `histogramEqualization` | `boolean` | Whether to apply histogram equalization; default `true` |
 
 ---
 
@@ -54,18 +58,31 @@ Mode-related state fields in `AppState` (`src/store/index.ts:5`):
 
 `colorMode` is updated via `updateAppState({ colorMode: '...' })` from the UI. No teardown or re-initialization is needed — the render loop reads `colorMode` on every frame and calls the right update function. Switching modes takes effect on the next frame.
 
-The charset picker is hidden in emoji mode (emojis replace characters entirely). The color picker is visible in all modes but only affects monochrome output.
+The color picker only affects monochrome output (color mode uses per-pixel span colors).
 
 ---
 
 ## Monochrome Mode
 
-The full monochrome pipeline (background segmentation, white balance, color temperature correction, LAB brightness, unsharp masking, character mapping) is documented in [docs/features/webcam-ascii.md](webcam-ascii.md#ascii-pipeline-monochrome).
+The full monochrome pipeline (background segmentation, white balance, color temperature correction, LAB brightness, histogram equalization, unsharp masking, character mapping) is documented in [docs/features/webcam-ascii.md](webcam-ascii.md#ascii-pipeline-monochrome).
 
 Key differences from other modes:
 - **Segmentation runs** — background pixels are zeroed before processing
-- **White balance + color temp** applied before LAB conversion
+- **White balance + color temp** applied before luminosity calculation
 - **Output is a plain string** — `asciiColor` CSS is applied by the `<pre>` component
+
+### Post-processing controls
+
+After cell-averaging, the following are applied in order:
+
+1. **Histogram equalization** (if enabled) — spreads brightness values across full `[0, 100]` range
+2. **Contrast** — linear scaling around the midpoint:
+   ```
+   adjusted = (normalized - 0.5) * contrast + 0.5
+   clamped  = max(0, min(1, adjusted))
+   ```
+   At `contrast = 1.0`: neutral. At `contrast = 2.0`: a pixel at 75% becomes 100%, a pixel at 25% becomes 0%. Midtones are pushed toward the extremes symmetrically.
+3. **Intensity** — simple brightness multiplier applied after contrast: `clamped * 100 * intensity`
 
 ---
 
@@ -100,8 +117,17 @@ For each cell, the 3×3 neighborhood average is computed (same as monochrome uns
 **Brightness unsharp mask** (`k = 0.5`) — selects the character:
 ```
 sharpened_L = clamp(L + 0.5 * (L - blur_L), 0, 100)
-charIndex = floor(sharpened_L / 100 * (charset.length - 1))
 ```
+
+**Bayer 4x4 ordered dithering** — applied before character mapping in both modes to increase perceived brightness levels:
+```
+step = 100 / (charset.length - 1)
+bayerThreshold = (BAYER_MATRIX_4X4[y % 4][x % 4] / 16 - 0.5)
+dithered_L = sharpened_L + bayerThreshold * step
+charIndex = clamp(floor(dithered_L / 100 * (charset.length - 1)), 0, charset.length - 1)
+```
+
+The Bayer matrix spatially distributes quantization error, creating the illusion of intermediate brightness levels by alternating between adjacent characters in a 4×4 tile pattern.
 
 **Color unsharp mask** (`k = 0.8`) — sharpens the RGB values used for span color:
 ```
@@ -111,6 +137,10 @@ sB = clamp(cellB + 0.8 * (cellB - blur_B), 0, 255)
 ```
 
 Color edges are sharpened more aggressively than brightness (`k = 0.8` vs `k = 0.5`) to make color boundaries pop visually.
+
+### Contrast and intensity in color mode
+
+Color mode applies the same histogram equalization, contrast, and intensity steps to `cellBrightness` before character selection. The per-cell RGB values (`cellR`, `cellG`, `cellB`) are **not** affected by contrast/intensity — only the brightness used to pick the character is. The span colors remain driven by the raw sharpened RGB, preserving the original color fidelity while the character choice responds to depth controls.
 
 ### Step 4 — Saturation boost
 
@@ -139,61 +169,15 @@ Where `#rrggbb` is the hex representation of the post-processed RGB. Row boundar
 
 ---
 
-## Emoji Mode
-
-`updateEmojiOutput(imageData)` at `src/store/index.ts:400`.
-
-Replaces ASCII characters with emoji chosen by nearest-color match. No charset is used.
-
-### Cell shape — square cells
-
-Unlike ASCII chars (which are ~2:1 height:width), emoji render as squares. Cell dimensions use 1:1 aspect ratio:
-
-```ts
-const cellSize = Math.floor(imgWidth / asciiWidth);  // square: width = height
-const height   = Math.floor(imgHeight / cellSize);
-```
-
-This gives more rows than the ASCII modes for the same `asciiWidth`, since cells are shorter.
-
-### White balance — Gray World algorithm
-
-Emoji mode applies the same Gray World white balance as monochrome mode (sample every 4th pixel, compute mean R/G/B, normalize to gray mean) but does not apply color temperature correction. The simpler approach is sufficient since emoji selection is coarse anyway.
-
-### Nearest-emoji lookup
-
-Per-cell average RGB (after white balance) is passed to `rgbToNearestEmoji(r, g, b)` from `src/constants/character-sets.ts:66`:
-
-```ts
-for (const entry of EMOJI_COLOR_PALETTE) {
-  const dr = r - entry.r, dg = g - entry.g, db = b - entry.b;
-  const dist = dr * dr + dg * dg + db * db;
-  if (dist < bestDist) { bestDist = dist; best = entry; }
-}
-```
-
-Squared Euclidean distance in RGB space — fast, no square root needed. The palette has 23 emoji covering darks, browns, warm neutrals/skin tones, reds, oranges, yellows, greens, blues, purples/pinks, and whites.
-
-### Output
-
-```ts
-set({ emojiOutput: { cols: asciiWidth, rows } });
-```
-
-`rows` is an array of strings, one per row, where each string is a concatenation of emoji characters (e.g. `"⬛🔴💛🟩"`). `cols` is `asciiWidth` — used by the renderer to compute font size.
-
----
-
 ## Character Sets
 
-Defined in `src/constants/character-sets.ts`. Used by monochrome and color modes only (not emoji).
+Defined in `src/constants/character-sets.ts`. Used by both monochrome and color modes.
 
 | Key | Name | Characters | Length |
 |---|---|---|---|
 | `MINIMAL` | Minimal | ` .:-=+*#%@` | 10 |
 | `STANDARD` | Standard | Full ASCII gradient (space → `$`) | 70 |
 | `BLOCKS` | Blocks | ` ░▒▓█` | 5 |
-| *(emoji mode)* | — | `EMOJI_COLOR_PALETTE` (23 entries) | 23 |
 
 `DEFAULT_CHARSET` is `'STANDARD'`. The active charset is read from `CHARACTER_SETS[selectedCharset].characters` in each update function.
 
@@ -225,38 +209,40 @@ Both are rendered in `src/components/AsciiDisplay.tsx` as a `<pre>` element. The
 - **Monochrome:** `{asciiOutput}` as a text child, with `color: asciiColor` CSS
 - **Color:** `dangerouslySetInnerHTML={{ __html: coloredAsciiOutput }}` to parse the span tags
 
-Font size uses a `clamp()` expression to fit the grid within the viewport:
+Font size is fixed to the user's chosen `fontSize` (default `12px`). The grid width is determined by `asciiWidth`, which is computed from the source image/video width and `fontSize`:
+
 ```
-clamp(4px, min(calc((100vw - 32px) / cols), calc((100dvh - 32px) / rows)), 24px)
-```
-
-### Emoji — `EmojiGrid` component
-
-`src/EmojiGrid.tsx` renders emoji mode. Reads `emojiOutput` from the store.
-
-```tsx
-<div style={{ fontSize, lineHeight: 1 }}>
-  {rows.map((row, y) => (
-    <div key={y} style={{ whiteSpace: 'nowrap', height: '1em' }}>
-      {row}
-    </div>
-  ))}
-</div>
+asciiWidth = floor(sourceWidth / (fontSize * 0.6))
 ```
 
-Each row is a `<div>` with `height: 1em` and `lineHeight: 1` so emoji cells are visually square. `whiteSpace: 'nowrap'` prevents emoji from wrapping mid-row.
+Smaller font sizes produce more columns and finer detail; larger font sizes produce fewer columns and coarser detail. The 2:1 cell aspect ratio is preserved in the worker (`cellHeight = floor(cellWidth * 2)`).
 
-Font size uses the same `clamp()`/`min()` expression as the ASCII modes but divides by `rows.length` for height. The `cols` and `rows.length` values come from `emojiOutput` directly.
+#### Display sizing — centered zoom-to-fit
 
-The `fontSize` clamp targets square cells — `1em` height and `1em` width. Emoji in most fonts render at full em-square width, making this work without explicit `width` on each cell.
+The `<pre>` tag in `AsciiDisplay.tsx` uses `w-full h-full` so it always fills the entire available viewport area (or its split-pane cell on the Image page). It no longer sizes itself to the content width/height. This means changing `fontSize`, `intensity`, or `contrast` does **not** resize the display container — only the text inside changes.
 
----
+The ASCII text is rendered inside an inner `<span>` that is **positioned absolutely** at `top: 50%; left: 50%` and **auto-scaled** to fill as much of the container as possible without distortion. A `ResizeObserver` watches both the container and the inner span; on every resize it computes:
+
+```
+scale = min(containerWidth / contentWidth, containerHeight / contentHeight)
+```
+
+The inner span applies `transform: translate(-50%, -50%) scale(N)`. The `translate(-50%, -50%)` centers the element by moving it back by half its own layout size, which is mathematically exact regardless of scale factor. This avoids the flexbox centering offset that occurred when `transform: scale()` was applied to an `inline-block` inside a flex container — at different scale factors the visual bounding box extended asymmetrically from the layout box, causing the output to drift left or right. The scale update is batched via `requestAnimationFrame` inside the `ResizeObserver` callback to reduce layout thrashing when `fontSize` changes trigger multiple rapid re-calculations.
+
+**Font-size transition: clearing stale output**
+When `fontSize` changes, the old ASCII grid (computed for a different `asciiWidth`) stays visible while the worker recalculates. During this gap, `ResizeObserver` computes a `scale` for the stale content at the new font size, producing a transient visual jump. To eliminate this, `updateAppState` in `src/store/index.ts` detects a `fontSize` change and immediately clears `asciiOutput` and `coloredAsciiOutput`. The placeholder text appears briefly; once the worker returns the correctly-sized new grid, it replaces the placeholder with no visual drift.
+
+### ModeControls Layout
+
+`ModeControls.tsx` renders as a horizontal configuration bar:
+- **Always visible:** Mode toggle (`MONOCHROME` / `COLOR`), charset picker (`STANDARD` / `MINIMAL` / `BLOCKS`), and a settings (⚙️) button
+- **Settings dropdown (upward):** Toggled by the ⚙️ button. Contains color swatches + `HexColorPicker` (monochrome only), `FONT` / `NOISE` / `INTENSITY` / `CONTRAST` sliders, and `HISTOGRAM EQ` toggle
+- The bar uses `flex-wrap justify-center` with `sm:` dividers so it wraps gracefully on narrow screens; the dropdown is `absolute bottom-full` with `z-30`
 
 ## Dependencies
 
-- `src/constants/character-sets.ts` — `CHARACTER_SETS`, `DEFAULT_CHARSET`, `EMOJI_COLOR_PALETTE`, `rgbToNearestEmoji`
-- `src/EmojiGrid.tsx` — renders emoji mode; reads `emojiOutput` from store
-- `src/store/index.ts` — `updateColorAsciiOutput`, `updateEmojiOutput`, `colorMode`, `asciiColor`, `selectedCharset`
-- `src/components/AsciiDisplay.tsx` — renders monochrome and color `<pre>`, conditionally mounts `EmojiGrid`
-- `src/components/ModeControls.tsx` — exposes mode toggle, charset picker, and color picker UI
+- `src/constants/character-sets.ts` — `CHARACTER_SETS`, `DEFAULT_CHARSET`, `BAYER_MATRIX_4X4`
+- `src/store/index.ts` — `updateColorAsciiOutput`, `updateAsciiOutput`, `colorMode`, `asciiColor`, `selectedCharset`
+- `src/components/AsciiDisplay.tsx` — renders monochrome and color `<pre>`
+- `src/components/ModeControls.tsx` — horizontal configuration bar with mode toggle, charset picker, and a settings (⚙️) button that opens an upward dropdown containing: color picker (monochrome only), font/noise/intensity/contrast sliders, and histogram equalization toggle
 - `src/components/WebcamPage.tsx` / `src/components/ImagePage.tsx` — host `ModeControls` and `AsciiDisplay`

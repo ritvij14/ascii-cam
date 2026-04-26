@@ -1,40 +1,26 @@
-# Task Master AI - Command Reference
+# Task Master AI - Usage Guide
 
-## CLI Commands
+> **IMPORTANT:** Task Master is used via MCP server in this project. CLI commands are not supported. If MCP tools are unavailable, report to user immediately.
 
-```bash
-# Daily Workflow
-task-master list                                   # Show all tasks with status
-task-master next                                   # Get next available task to work on
-task-master show <id>                              # View task details (e.g., task-master show 1.2)
-task-master set-status --id=<id> --status=done     # Mark task complete
+## MCP Tools (Primary Interface)
 
-# Task Management
-task-master add-task --prompt="description" --research        # Add new task with AI
-task-master expand --id=<id> --research --force               # Break task into subtasks
-task-master update-task --id=<id> --prompt="changes"          # Update specific task
-task-master update --from=<id> --prompt="changes"             # Update multiple tasks from ID onwards
-task-master update-subtask --id=<id> --prompt="notes"         # Append implementation notes to subtask
+Use these MCP tools instead of CLI commands:
 
-# Analysis & Planning
-task-master analyze-complexity --research          # Analyze task complexity
-task-master complexity-report                      # View complexity analysis
-task-master expand --all --research                # Expand all eligible tasks
+| Operation | MCP Tool |
+|-----------|----------|
+| Get next task | `mcp__task-master-ai__next_task` |
+| List all tasks | `mcp__task-master-ai__get_tasks` |
+| View task details | `mcp__task-master-ai__get_task` |
+| Parse PRD to tasks | `mcp__task-master-ai__parse_prd` |
+| Expand task into subtasks | `mcp__task-master-ai__expand_task` |
+| Analyze complexity | `mcp__task-master-ai__analyze_project_complexity` |
+| Update task | `mcp__task-master-ai__update_task` |
+| Update multiple tasks | `mcp__task-master-ai__update` |
+| Set task status | `mcp__task-master-ai__set_task_status` |
+| Add new task | `mcp__task-master-ai__add_task` |
+| Add dependency | `mcp__task-master-ai__add_dependency` |
+| Validate dependencies | `mcp__task-master-ai__validate_dependencies` |
 
-# Dependencies & Organization
-task-master add-dependency --id=<id> --depends-on=<id>       # Add task dependency
-task-master remove-dependency --id=<id> --depends-on=<id>    # Remove task dependency
-task-master move --from=<id> --to=<id>                       # Reorganize task hierarchy
-task-master validate-dependencies                             # Check for dependency issues
-task-master fix-dependencies                                  # Auto-fix invalid dependencies
-
-# PRD Parsing
-task-master parse-prd .taskmaster/docs/<name>.md              # Generate tasks from PRD
-task-master parse-prd .taskmaster/docs/<name>.md --append     # Add tasks from new PRD to existing list
-
-# Generation
-task-master generate                               # Regenerate individual task files from tasks.json
-```
 
 ## Task Structure
 
@@ -68,26 +54,44 @@ task-master generate                               # Regenerate individual task 
 
 ## Iterative Subtask Implementation
 
-1. `task-master show <subtask-id>` — Understand requirements
+1. Use `mcp__task-master-ai__get_task` with subtask ID — Understand requirements
 2. Explore codebase and plan implementation
-3. `task-master update-subtask --id=<id> --prompt="detailed plan"` — Log plan
-4. `task-master set-status --id=<id> --status=in-progress` — Start work
+3. Use `mcp__task-master-ai__update_task` — Log plan
+4. Use `mcp__task-master-ai__set_task_status` with status "in-progress" — Start work
 5. Implement code following logged plan
-6. `task-master update-subtask --id=<id> --prompt="what worked/didn't work"` — Log progress
-7. `task-master set-status --id=<id> --status=done` — Complete task
+6. Use `mcp__task-master-ai__update_task` — Log progress
+7. Use `mcp__task-master-ai__set_task_status` with status "done" — Complete task
 
 ## Adding New Features via PRD
 
 When new features need to be added to an existing project:
 1. Write a focused PRD in `.taskmaster/docs/<feature-name>.md`
-2. Parse with `--append`: `task-master parse-prd .taskmaster/docs/<feature-name>.md --append`
-3. Run `task-master analyze-complexity --research` on the new task IDs
-4. Expand: `task-master expand --all --research`
+2. Use `mcp__task-master-ai__parse_prd` with the PRD path and append mode
+3. Use `mcp__task-master-ai__analyze_project_complexity` on the new task IDs
+4. Use `mcp__task-master-ai__expand_task` to break into subtasks
 
 ## Rules
 
-- Never manually edit `tasks.json` — use commands instead
-- Never manually edit `.taskmaster/config.json` — use `task-master models`
+- Never manually edit `tasks.json` — use MCP tools instead
+- Never manually edit `.taskmaster/config.json` — use MCP tools
 - Task files in `.taskmaster/tasks/` are auto-generated from tasks.json
-- AI-powered operations (`parse-prd`, `expand`, `add-task`, `update`, `update-task`, `update-subtask`, `analyze-complexity`) make AI calls and may take up to a minute
+- AI-powered operations make MCP calls and may take up to a minute
 - Do not re-initialize — it will not do anything beyond re-adding the same core files
+
+## Efficiency Guidelines
+
+**Use these tools in this priority order:**
+
+1. `mcp__task-master-ai__next_task` — Get next available task. Use this FIRST.
+2. `mcp__task-master-ai__get_task` — For getting single task details and dependencies
+3. `mcp__task-master-ai__update_task` — Update task details as you work
+4. `mcp__task-master-ai__set_task_status` — Mark tasks in-progress/done
+
+These 4 tools should cover 90% of your Task Master usage.
+
+**When NOT to use get_tasks:**
+- If you need all tasks and the output is large, it writes to a file and wastes memory
+- Instead, for specific searches, use grep on `tasks. json` directly
+- If you genuinely need all tasks, read `tasks. json` file directly
+
+The goal is to be efficient: next_task → get_task → update → set_status. That's it.

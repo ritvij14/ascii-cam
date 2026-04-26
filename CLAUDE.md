@@ -1,6 +1,6 @@
 # ASCII Camera
 
-> **Master context file. Single source of truth for this project. All docs/ files are modules that extend this. README.md is a public-facing summary derived from this. PRDs live in `.taskmaster/docs/` — run `task-master parse-prd .taskmaster/docs/prd.md` to generate tasks.**
+> **Master context file. Single source of truth for this project. All docs/ files are modules that extend this. README.md is a public-facing summary derived from this. PRDs live in `.taskmaster/docs/` — use `mcp__task-master-ai__parse_prd` to generate tasks.**
 
 ---
 
@@ -70,19 +70,18 @@
 - `src/components/RootLayout.tsx` — tab nav shell with `<Outlet />`
 - `src/components/WebcamPage.tsx` — webcam route page; includes `PerfOverlay` (≤20 LOC, tightly coupled)
 - `src/components/ImagePage.tsx` — image upload route page
-- `src/components/AsciiDisplay.tsx` — shared ASCII/emoji output renderer
+- `src/components/AsciiDisplay.tsx` — shared ASCII output renderer
 - `src/components/ModeControls.tsx` — shared mode/charset/color-picker controls
-- `src/constants/character-sets.ts` — pure data: character set definitions, emoji palette, `rgbToNearestEmoji` helper
-- `src/EmojiGrid.tsx` — rendering component for emoji mode only
+- `src/constants/character-sets.ts` — pure data: character set definitions
 - `docs/` — project documentation (features, infra, decisions, patterns)
 
 **Data flow (happy path — webcam to ASCII):**
 
 1. User clicks "Start Webcam" → component calls `startWebcam()` store action
 2. Store requests `getUserMedia`, initializes MediaPipe segmentation, starts `requestAnimationFrame` loop
-3. Each frame: canvas captures video frame → segmentation mask computed → `updateAsciiOutput` / `updateColorAsciiOutput` / `updateEmojiOutput` called depending on `colorMode`
-4. Store writes output (`asciiOutput`, `coloredAsciiOutput`, or `emojiOutput`) → subscribed components re-render
-5. `AsciiDisplay` or `EmojiGrid` renders the new output to the DOM
+3. Each frame: canvas captures video frame → segmentation mask computed → `updateAsciiOutput` or `updateColorAsciiOutput` called depending on `colorMode`
+4. Store writes output (`asciiOutput` or `coloredAsciiOutput`) → subscribed components re-render
+5. `AsciiDisplay` renders the new output to the DOM
 
 **Key architectural decisions:**
 
@@ -90,7 +89,7 @@
 
 - Single Zustand store for all state + logic: keeps components as pure UI, all imperative logic in one place
 - Client-side only (no backend): all processing happens in the browser via Canvas API and WebAssembly (MediaPipe)
-- Three rendering modes (monochrome / color / emoji): each has its own output field and render path, no shared mutable state between modes
+- Two rendering modes (monochrome / color): each has its own output field and render path, no shared mutable state between modes
 - Off-screen canvas for screenshots: avoids DOM capture limitations, gives resolution control across all modes
 - No `useEffect` for business logic: all side effects owned by store actions, triggered by user events
 
@@ -102,7 +101,7 @@
 
 ### Naming
 
-- Files: kebab-case (e.g. `character-sets.ts`). Components: PascalCase (e.g. `EmojiGrid.tsx`). Hooks: camelCase with `use` prefix. Constants: UPPER_SNAKE_CASE.
+- Files: kebab-case (e.g. `character-sets.ts`). Components: PascalCase (e.g. `WebcamPage.tsx`). Hooks: camelCase with `use` prefix. Constants: UPPER_SNAKE_CASE.
 - Store actions: camelCase verbs (e.g. `startWebcam`, `updateAsciiOutput`, `takeScreenshot`)
 
 ### Code Style
@@ -151,7 +150,7 @@ Before writing a `useEffect`, check which category it falls into:
 > Do not refactor, rename, or change the interfaces of these without explicit user confirmation.
 
 - `src/store/index.ts` — all state and business logic; interface changes affect every component
-- `src/constants/character-sets.ts` — `CHARACTER_SETS` and `EMOJI_COLOR_PALETTE` are consumed by store actions directly
+- `src/constants/character-sets.ts` — `CHARACTER_SETS` is consumed by store actions directly
 
 ### File Navigation
 
@@ -218,8 +217,8 @@ pnpm run dev
 
 **How to use PRDs:**
 
-- **Starting a project:** Write your PRD in `.taskmaster/docs/prd.md`, then run `task-master parse-prd .taskmaster/docs/prd.md`
-- **Adding a feature later:** Write a focused PRD in `.taskmaster/docs/<feature-name>.md`, then run `task-master parse-prd .taskmaster/docs/<feature-name>.md --append`
+- **Starting a project:** Write your PRD in `.taskmaster/docs/prd.md`, then use `mcp__task-master-ai__parse_prd` with path `.taskmaster/docs/prd.md`
+- **Adding a feature later:** Write a focused PRD in `.taskmaster/docs/<feature-name>.md`, then use `mcp__task-master-ai__parse_prd` with append mode
 - **PRD templates:** See `.taskmaster/templates/` — `example_prd.txt` (simple) and `example_prd_rpg.txt` (detailed with dependency graphs)
 
 **Writing good PRDs:**
@@ -272,7 +271,8 @@ pnpm run dev
 **At the start of every session:**
 
 1. Read this file fully
-2. Run `task-master next` to understand what to work on
+2. Verify MCP is connected by calling `mcp__task-master-ai__next_task`. If it fails or returns an error indicating disconnected server, immediately report to user: "Taskmaster MCP is not connected. Please check that the MCP server is running."
+3. Use the task ID from `next_task` to call `mcp__task-master-ai__get_task` for details and dependencies
 3. Read the relevant feature doc from `docs/features/` for the current task
 4. Read relevant infra docs only if the task touches that infra layer
 
@@ -297,17 +297,17 @@ If unsure which feature doc to load, ask before loading anything.
 
 **Before starting any task:**
 
-- Check `task-master list` for dependencies — never work on a task whose dependency is not done
+- Use `mcp__task-master-ai__get_task` with task ID to check dependencies — never work on a task whose dependency is not done
 - If the task is ambiguous, read the feature doc before asking for clarification
 
 **During a session:**
 
 - Update task status via TaskMaster as work progresses — do not leave tasks in stale states
-- The moment you discover something that changes how a future task should be implemented, stop and run `task-master update --from=<id> --prompt="..."` BEFORE continuing. Do not defer this. Stale task descriptions compound.
+- The moment you discover something that changes how a future task should be implemented, stop and use `mcp__task-master-ai__update` with the task ID and prompt BEFORE continuing. Do not defer this. Stale task descriptions compound.
 
 **At the end of every session:**
 
-- Mark completed tasks done: `task-master set-status --id=[id] --status=done`
+- Mark completed tasks done: use `mcp__task-master-ai__set_task_status` with status "done"
 - Update any future tasks affected by discoveries made this session
 - The file tree hook will auto-update docs/infra/file-tree.md
 

@@ -3,7 +3,7 @@
 > **Feature doc for real-time webcam-to-ASCII conversion.**
 > Covers webcam lifecycle, segmentation, render loop, and ASCII pipeline.
 > Status: Stable
-> Last updated: 2026-03-30 (Tile-based incremental processing removed — artifacts unresolvable)
+> Last updated: 2026-04-25 (Added Bayer 4x4 ordered dithering)
 
 ---
 
@@ -31,7 +31,7 @@ The entire pipeline lives in `src/store/index.ts`. Components are UI-only — th
 
 1. User clicks "Start Webcam" → component calls `startWebcam()`
 2. `startWebcam` lazy-inits segmentation, requests `getUserMedia`, starts `startRenderLoop()`
-3. **Stage 1** (rAF, ~30fps): video drawn to canvas → mirrored → `ImageData` extracted → for color/emoji dispatched to worker directly; for monochrome written to `segQueueFrame`
+3. **Stage 1** (rAF, ~30fps): video drawn to canvas → mirrored → `ImageData` extracted → for color dispatched to worker directly; for monochrome written to `segQueueFrame`
 4. **Stage 2** (rAF, MediaPipe throughput ~20fps): reads `segQueueFrame` → `segmenter.send()` → temporal-smoothed mask applied → masked `ImageData` posted to worker via `updateAsciiOutput`
 5. **Stage 3** (worker): computes ASCII string (white balance, LAB L*, unsharp mask) → posts result back → `onmessage` writes `asciiOutput` → `AsciiDisplay` re-renders the `<pre>`
 
@@ -133,7 +133,7 @@ maskData = maskCtx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height)
 
 `segmenter.send()` is async — MediaPipe processes the frame and fires `onResults` synchronously before the promise resolves. After `send()` returns, `maskCanvasRef` contains the mask for the current frame.
 
-**Segmentation is only run in monochrome mode** (`src/store/index.ts:519`). Color and emoji modes skip it — they use the full unmasked frame.
+**Segmentation is only run in monochrome mode**. Color mode skips it — it uses the full unmasked frame.
 
 ### Temporal smoothing (`src/store/index.ts:146`)
 
@@ -174,31 +174,28 @@ if (timestamp - lastFrameTime < targetFrameMs) {
 
 `lastFrameTime` is a closure variable (not store state) — updating it doesn't trigger re-renders. It is updated *after* processing completes, ensuring the 33ms gap is measured from end-of-frame to start-of-next rather than start-to-start.
 
-### Portrait mode detection
+### Grid dimension computation
 
-On the first frame with `videoRef.readyState === HAVE_ENOUGH_DATA`, the loop checks the video dimensions once:
+`asciiWidth` is no longer a fixed default. It is computed per-frame from the video width and the user's chosen `fontSize`:
 
 ```ts
-if (videoRef.videoHeight > videoRef.videoWidth) {
-  set({ asciiWidth: 80 });
-}
+asciiWidth = Math.floor(videoWidth / (fontSize * 0.6));
 ```
 
-Portrait video (mobile, held vertically) has more rows than columns in the ASCII grid. Reducing `asciiWidth` from the default to 80 prevents the grid from being too wide for the viewport.
+This computation also runs inside `updateAsciiOutput` and `updateColorAsciiOutput` before posting to the worker, ensuring the worker always receives the correct column count. Portrait video naturally produces fewer columns because `videoWidth` is smaller.
 
 ### Stage 1 — per-frame sequence (`captureFrame`)
 
 ```
 1. Check timestamp — skip if < 33ms since last frame
 2. Check videoRef.readyState === HAVE_ENOUGH_DATA
-3. One-time portrait check (aspectChecked flag)
-4. Resize canvas to video dimensions
-5. Mirror-draw video to canvas: ctx.scale(-1, 1) then drawImage
-6. Extract imageData from canvas
-7. Dispatch by colorMode (no blocking):
+3. Resize canvas to video dimensions
+4. Mirror-draw video to canvas: ctx.scale(-1, 1) then drawImage
+5. Extract imageData from canvas
+6. Dispatch by colorMode (no blocking):
    - monochrome → segQueueFrame = imageData (overwrite; Stage 2 picks up newest)
    - color → updateColorAsciiOutput(imageData)
-   - emoji → updateEmojiOutput(imageData)
+7. Compute asciiWidth from videoWidth and fontSize for perfMetrics
 8. Update perfMetrics (frameTimeMs, fps, resolution, gridSize)
 9. Schedule next frame: set({ animationFrameId: requestAnimationFrame(captureFrame) })
 ```
@@ -239,7 +236,20 @@ Stage 2 applies the temporally-smoothed mask to the queued `ImageData` before ca
 
 If segmentation errors, the unmasked frame is used. `updateAsciiOutput` now receives an already-masked `ImageData` and simply checks the mailbox and posts to the worker.
 
-### Step 2 — White balance (Gray World algorithm, worker thread)
+### Step 2 — Noise/grain (optional, worker thread)
+
+If `noise > 0` (range 0–50, default 0), a random value `±noise` is added to each pixel's R, G, B channels before any further processing. This simulates film grain and can help break banding in smooth gradient regions.
+
+```ts
+const n = Math.random() * noise * 2 - noise;
+data[i]     += n;
+data[i + 1] += n;
+data[i + 2] += n;
+```
+
+The `Uint8ClampedArray` auto-clamps to [0, 255]. Noise is applied in-place to the `ImageData` buffer inside the worker so both WebGL and CPU paths receive the noisy pixels.
+
+### Step 3 — White balance (Gray World algorithm, worker thread)
 
 Sample every 4th pixel (every 16th byte) across the frame to compute mean R, G, B:
 
@@ -252,13 +262,13 @@ wbB = grayMean / meanB
 
 This normalizes the average color of the frame to neutral gray, compensating for cast from artificial lighting.
 
-### Step 3 — Color temperature correction
+### Step 4 — Color temperature correction
 
 Detect dominant color temperature from the ratio `(meanR + meanG) / (meanB + 1)`:
 - Ratio > 2.5 → warm light (tungsten/sunset): reduce R by 8%, boost B by 8%
 - Ratio < 1.5 → cool light (fluorescent/overcast): boost R by 8%, reduce B by 8%
 
-### Step 4 — LAB brightness (first pass)
+### Step 5 — LAB brightness (first pass)
 
 For each cell in the ASCII grid:
 1. Average the RGB of all pixels in the cell (cellWidth × cellHeight pixels)
@@ -292,14 +302,21 @@ LAB L* is used instead of simple luminance because it matches human perception �
 
 **Files:** `src/worker/ascii-worker.ts` — `initWebGL()`, `computeBrightnessWithWebGL()`, updated `processMonochrome()`
 
-Cell dimensions:
+Cell dimensions (computed in the worker from the source image size and dynamically-derived `asciiWidth`):
+
 ```ts
 const cellWidth  = Math.floor(imgWidth / asciiWidth);
 const cellHeight = Math.floor(cellWidth * 2); // 2:1 aspect ratio for monospace chars
 const height     = Math.floor(imgHeight / cellHeight);
 ```
 
-### Step 5 — Unsharp masking (second pass)
+`asciiWidth` is derived from the user's `fontSize` and the source width before each frame is posted to the worker:
+
+```ts
+asciiWidth = Math.floor(sourceWidth / (fontSize * 0.6));
+```
+
+### Step 6 — Unsharp masking (second pass)
 
 For each cell, compute the average L* of its 3×3 neighborhood (blur), then:
 
@@ -309,14 +326,26 @@ sharpened = original + 0.5 * (original - blurred)
 
 `k = 0.5` is a moderate sharpening strength — enough to make character edges crisp without amplifying noise. Clamped to [0, 100].
 
-### Step 6 — Character mapping
+### Step 7 — Bayer 4x4 ordered dithering
+
+Before character mapping, Bayer 4x4 ordered dithering is applied to increase the perceived number of brightness levels beyond the character set size:
 
 ```ts
-const charIndex = Math.floor((sharpened / 100) * (charset.length - 1));
+const step = 100 / (charset.length - 1);
+const bayerThreshold = (BAYER_MATRIX_4X4[y % 4][x % 4] / 16 - 0.5);
+const dithered = sharpened + bayerThreshold * step;
+```
+
+The Bayer matrix spatially distributes quantization error across a 4×4 tile, creating the illusion of intermediate brightness levels by alternating between adjacent characters. The threshold is centered around zero and scaled to one character step.
+
+### Step 8 — Character mapping
+
+```ts
+const charIndex = Math.max(0, Math.min(charset.length - 1, Math.floor((dithered / 100) * (charset.length - 1))));
 parts.push(charset[charIndex]);
 ```
 
-Maps sharpened L* (0–100) linearly to the charset index. Darker → earlier charset character (space/dot), brighter → later character (dense block).
+Maps dithered L* (0–100) linearly to the charset index. Darker → earlier charset character (space/dot), brighter → later character (dense block).
 
 The active charset is `CHARACTER_SETS[selectedCharset].characters` from `src/constants/character-sets.ts`. Default charset has 10 characters from space to `@`.
 
@@ -338,15 +367,15 @@ The active charset is `CHARACTER_SETS[selectedCharset].characters` from `src/con
 
 Both fixes (lowering thresholds, using max-diff, adding neighbour propagation) were evaluated but the fundamental problem — that a coarse spatial partition cannot cleanly track sub-tile motion — was deemed too costly to solve correctly.
 
-**Current behaviour:** Every cell is recomputed every frame. No caching, no diff logic. `processMonochrome`, `processColor`, and `processEmoji` return their result directly (no `tilesProcessed`/`tilesSkipped` fields). `perfMetrics` no longer includes tile stats and `PerfOverlay` no longer shows them.
+**Current behaviour:** Every cell is recomputed every frame. No caching, no diff logic. `processMonochrome` and `processColor` return their result directly (no `tilesProcessed`/`tilesSkipped` fields). `perfMetrics` no longer includes tile stats and `PerfOverlay` no longer shows them.
 
 ---
 
 ## Web Worker
 
-The ASCII conversion pipeline (monochrome / color / emoji) runs in `src/worker/ascii-worker.ts` on a separate OS thread. This prevents the main thread (React rendering, rAF scheduling, user events) from being blocked by the ~20–40ms per-frame pixel math.
+The ASCII conversion pipeline (monochrome / color) runs in `src/worker/ascii-worker.ts` on a separate OS thread. This prevents the main thread (React rendering, rAF scheduling, user events) from being blocked by the ~20–40ms per-frame pixel math.
 
-**Current state:** All three processing modes — monochrome (`processMonochrome`), color (`processColor`), and emoji (`processEmoji`) — run fully in the worker. The `asciiWorker` is **lazily initialized** via `getWorker()` on the first processed frame (not at store load time). The `workerBusy` flag implements the single-slot mailbox. `asciiTimeMs` is measured as worker round-trip time (from `postMessage` to `onmessage` response).
+**Current state:** Both processing modes — monochrome (`processMonochrome`) and color (`processColor`) — run fully in the worker. The `asciiWorker` is **lazily initialized** via `getWorker()` on the first processed frame (not at store load time). The `workerBusy` flag implements the single-slot mailbox. `asciiTimeMs` is measured as worker round-trip time (from `postMessage` to `onmessage` response).
 
 **Message protocol:**
 
@@ -354,9 +383,9 @@ The ASCII conversion pipeline (monochrome / color / emoji) runs in `src/worker/a
 Main thread (store)                        Worker thread
 ──────────────────                         ─────────────
 worker.postMessage({                  →    ctx.onmessage fires
-  type: 'process',                         processMonochrome / processColor / processEmoji
+  type: 'process',                         processMonochrome / processColor
   imageData,                               ctx.postMessage({ type: 'result',
-  config: { asciiWidth, colorMode, ... }     asciiOutput | coloredAsciiOutput | emojiOutput,
+  config: { asciiWidth, colorMode, ... }     asciiOutput | coloredAsciiOutput,
 }, [imageData.buffer])                       tilesProcessed, tilesSkipped })
                                      ←    result received
 store.onmessage → set({ asciiOutput, perfMetrics: { ...tilesProcessed, tilesSkipped } })
@@ -377,6 +406,6 @@ store.onmessage → set({ asciiOutput, perfMetrics: { ...tilesProcessed, tilesSk
 ## Dependencies
 
 - `@mediapipe/selfie_segmentation` — loaded from CDN at runtime; not bundled. First session requires network; subsequent sessions use browser cache.
-- `src/constants/character-sets.ts` — provides `CHARACTER_SETS` and the `DEFAULT_CHARSET` key
+- `src/constants/character-sets.ts` — provides `CHARACTER_SETS`, `DEFAULT_CHARSET`, and `BAYER_MATRIX_4X4`
 - `src/components/WebcamPage.tsx` — registers `videoRef`, `canvasRef`, `maskCanvasRef` via ref callbacks; calls `startWebcam`/`stopWebcam` from event handlers
-- `src/worker/ascii-worker.ts` — Web Worker; `processMonochrome`, `processColor`, and `processEmoji` all fully implemented
+- `src/worker/ascii-worker.ts` — Web Worker; `processMonochrome` and `processColor` fully implemented

@@ -35,8 +35,7 @@ Complete the following in order:
    - Started but unfinished → `set_task_status` to in-progress with a note
    - Discovered blocker → `set_task_status` to deferred with reason
 
-3. Use `get_tasks` to review all pending tasks. Ask: does anything discovered
-   this session change how any of these should be implemented? If yes, use
-   `update_subtask` to update those task descriptions now before closing.
+3. Ask: does anything discovered this session change how any other task 
+  should be implemented? If yes, read tasks.json for that specific thing, use `update_subtask` to update those task descriptions now before closing.
 
 4. Confirm: "Session wrapped. Docs updated: [list]. Tasks updated: [list]."

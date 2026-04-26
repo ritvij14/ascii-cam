@@ -9,15 +9,11 @@ const ImagePage = () => {
   const takeScreenshot = useStore((state) => state.takeScreenshot);
   const screenshotLoading = useStore((state) => state.screenshotLoading);
   const uploadedImage = useStore((state) => state.uploadedImage);
-  const asciiColor = useStore((state) => state.asciiColor);
-  const colorMode = useStore((state) => state.colorMode);
   const hasOutput = useStore(
     (state) =>
       state.asciiOutput.length > 0 ||
-      state.coloredAsciiOutput.length > 0 ||
-      state.emojiOutput.rows.length > 0
+      state.coloredAsciiOutput.length > 0
   );
-  const [showColorPicker, setShowColorPicker] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -30,7 +26,6 @@ const ImagePage = () => {
         uploadedImage: dataUrl,
         asciiOutput: "",
         coloredAsciiOutput: "",
-        emojiOutput: { cols: 0, rows: [] },
       });
       setIsProcessing(true);
       await processImage(dataUrl);
@@ -145,7 +140,7 @@ const ImagePage = () => {
                 Processing...
               </div>
             ) : (
-              <div className="flex items-center justify-center w-full h-full min-h-0 overflow-hidden">
+              <div className="w-full h-full min-h-0 overflow-hidden">
                 <AsciiDisplay />
               </div>
             )}
@@ -157,25 +152,15 @@ const ImagePage = () => {
       <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-3">
         {uploadedImage && (
           <ModeControls
-            showColorPicker={showColorPicker}
-            setShowColorPicker={setShowColorPicker}
             onModeChange={handleReprocess}
             onCharsetChange={handleReprocess}
+            onFontSizeChange={handleReprocess}
+            onIntensityChange={handleReprocess}
+            onContrastChange={handleReprocess}
           />
         )}
 
         <div className="flex items-center gap-3">
-          {uploadedImage && colorMode === "monochrome" && (
-            <button
-              onClick={() => setShowColorPicker(!showColorPicker)}
-              className="w-10 h-10 rounded-full border-2 transition hover:scale-110"
-              style={{
-                backgroundColor: asciiColor,
-                borderColor: showColorPicker ? "#ffffff" : "#4b5563",
-              }}
-              title="Color"
-            />
-          )}
           <button
             onClick={() => document.getElementById("file-input")?.click()}
             className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6 py-3 rounded-lg transition"

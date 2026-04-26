@@ -105,31 +105,63 @@ A feature is added that genuinely requires persistence (e.g. saved presets, gall
 
 ---
 
-### ADR-004: Three separate output fields for three rendering modes
+### ADR-004: Two separate output fields for two rendering modes (emoji removed)
 
 **Date:** 2026-01-01
+**Revised:** 2026-04-17
 **Status:** Active
 
-**Decision:**
-Each rendering mode has its own dedicated state field: `asciiOutput` (string), `coloredAsciiOutput` (string of HTML), and `emojiOutput` ({ cols, rows[] }). Modes do not share mutable state.
+Each rendering mode has its own dedicated state field: `asciiOutput` (string) and `coloredAsciiOutput` (string of HTML). Modes do not share mutable state.
 
 **Context:**
-Three rendering modes produce structurally different output: monochrome is plain text, color mode is an HTML string with `<span style="color:...">` per character, and emoji mode is an array of emoji strings per row (square cells, not 2:1 character cells). A single unified output field would require either a complex discriminated union or lossy conversion between representations.
+Two rendering modes produce structurally different output: monochrome is plain text, color mode is an HTML string with `<span style="color:...">` per character. A single unified output field would require either a complex discriminated union or lossy conversion between representations.
+
+**Emoji mode was removed** (2026-04-17) as part of the V2 depth improvement — it added ~300 LOC and bundle weight with limited user value while complicating the UI. The `emojiOutput` field, `updateEmojiOutput` action, `EmojiGrid` component, `EMOJI_COLOR_PALETTE`, and `processEmoji` worker function were all deleted.
 
 **Options considered:**
 - **Option A (chosen) — Separate fields per mode:** Each mode writes to its own field. Components read the field for the active mode.
-- **Option B — Single `output` field with a type discriminant:** `{ type: 'mono' | 'color' | 'emoji'; data: ... }`
-- **Option C — Always compute all three modes per frame:** Keep all three outputs current, switch is instant.
+- **Option B — Single `output` field with a type discriminant:** `{ type: 'mono' | 'color'; data: ... }`
+- **Option C — Always compute both modes per frame:** Keep both outputs current, switch is instant.
 
 **Reasoning:**
-Option B requires every consumer to type-narrow before use, and makes it easy to accidentally read stale data from the wrong mode branch. Option C triples the per-frame processing cost with no user-visible benefit — users see one mode at a time. Option A is the simplest: each mode owns its field, stale fields from other modes are simply ignored.
+Option B requires every consumer to type-narrow before use, and makes it easy to accidentally read stale data from the wrong mode branch. Option C doubles the per-frame processing cost with no user-visible benefit — users see one mode at a time. Option A is the simplest: each mode owns its field, stale fields from other modes are simply ignored.
 
 **Tradeoffs accepted:**
 - When switching modes, the previous mode's output field holds stale data until cleared (not a visible bug, but worth knowing).
-- Adding a fourth mode requires a new output field and a new render path.
+- Adding another mode requires a new output field and a new render path.
 
 **Revisit when:**
-A fourth rendering mode is added that shares enough structure with an existing mode to make a unified field worthwhile.
+A third rendering mode is added that shares enough structure with an existing mode to make a unified field worthwhile.
+
+---
+
+### ADR-010: Remove emoji mode
+
+**Date:** 2026-04-17
+**Status:** Active
+
+**Decision:**
+Remove emoji mode entirely, narrowing the app to two rendering modes (monochrome and color).
+
+**Context:**
+Emoji mode introduced ~300 LOC including a 23-entry color palette, a separate `EmojiGrid` component, worker-side emoji processing, and a third output field in the store. Three modes also complicated the UI — users had to choose between monochrome/color/emoji, the charset picker needed conditional hiding, and each feature (screenshot export, mode controls) needed a third branch.
+
+From a user-value standpoint, the emoji mode was a novelty that didn't justify the bundle weight or code maintenance cost. Two modes are enough: monochrome for stylized ASCII and color for photorealistic output.
+
+**What was removed:**
+- `src/EmojiGrid.tsx` — entire component file
+- `emojiOutput` state field and `updateEmojiOutput` action from store
+- `processEmoji` worker function and `emojiOutput` from worker protocol
+- `EMOJI_COLOR_PALETTE` and `rgbToNearestEmoji` from `constants/character-sets.ts`
+- Third mode button from `ModeControls`
+- `colorMode` type narrowed from `'monochrome' | 'color' | 'emoji'`
+
+**Tradeoffs accepted:**
+- Emoji mode is gone; users who preferred it now use color mode instead (which offers richer output).
+- Bundle size reduced by ~8 kB (emoji palette data + processing logic).
+
+**Revisit when:**
+User feedback consistently requests an emoji mode with significantly different behavior (unlikely — better to invest in grayscale/dithering pipeline instead).
 
 ---
 
@@ -142,7 +174,7 @@ A fourth rendering mode is added that shares enough structure with an existing m
 Screenshots are rendered by creating an off-screen `<canvas>` element at 3× resolution and drawing the ASCII output programmatically, rather than using `html2canvas` or DOM screenshot APIs.
 
 **Context:**
-The ASCII output is rendered as a `<pre>` tag (monochrome), a block of `<span>` elements (color), or a grid of emoji cells (emoji mode). DOM screenshot libraries like `html2canvas` struggle with custom fonts, precise character spacing, and cross-origin resources. We need pixel-perfect, high-resolution output.
+The ASCII output is rendered as a `<pre>` tag (monochrome) or a block of `<span>` elements (color). DOM screenshot libraries like `html2canvas` struggle with custom fonts, precise character spacing, and cross-origin resources. We need pixel-perfect, high-resolution output.
 
 **Options considered:**
 - **Option A (chosen) — Off-screen canvas, draw programmatically:** Parse the output and draw each character with `ctx.fillText` at 3× scale.
@@ -150,11 +182,10 @@ The ASCII output is rendered as a `<pre>` tag (monochrome), a block of `<span>` 
 - **Option C — `window.print()` / CSS print styles:** Use browser print to PDF as a proxy for image export.
 
 **Reasoning:**
-Option B is unreliable for monospace text rendering — character alignment differences between the DOM and canvas mean the output rarely looks identical to what the user sees. Option C produces PDF, not PNG, and gives no control over resolution. Option A gives full control: exact character spacing, exact colors, exact 3× scale, works identically across all three modes.
+Option B is unreliable for monospace text rendering — character alignment differences between the DOM and canvas mean the output rarely looks identical to what the user sees. Option C produces PDF, not PNG, and gives no control over resolution. Option A gives full control: exact character spacing, exact colors, exact 3× scale, works identically across both modes.
 
 **Tradeoffs accepted:**
 - Color mode requires parsing the HTML string (`coloredAsciiOutput`) with regex to extract character/color pairs — brittle if the HTML format ever changes.
-- Emoji mode requires `[...row]` spread to handle multi-codepoint emoji correctly — adds complexity.
 
 **Revisit when:**
 A browser API for high-resolution DOM capture becomes reliable across all targets (unlikely near-term).
@@ -167,10 +198,10 @@ A browser API for high-resolution DOM capture becomes reliable across all target
 **Status:** Active (scaffold in place; logic migration in progress)
 
 **Decision:**
-The ASCII conversion pipeline (monochrome, color, emoji) is being moved from the main thread into a dedicated Web Worker (`src/worker/ascii-worker.ts`). The store owns the worker lifecycle and message protocol; the worker is a pure computation engine with no state.
+The ASCII conversion pipeline (monochrome, color) is being moved from the main thread into a dedicated Web Worker (`src/worker/ascii-worker.ts`). The store owns the worker lifecycle and message protocol; the worker is a pure computation engine with no state.
 
 **Context:**
-`updateAsciiOutput` / `updateColorAsciiOutput` / `updateEmojiOutput` each take ~20–40ms per frame at 720p. Running them on the main thread blocks React rendering and user input during that window. At 30fps the frame budget is 33ms — the conversion alone can consume the entire budget, leaving no time for layout, paint, or input handling.
+`updateAsciiOutput` / `updateColorAsciiOutput` each take ~20–40ms per frame at 720p. Running them on the main thread blocks React rendering and user input during that window. At 30fps the frame budget is 33ms — the conversion alone can consume the entire budget, leaving no time for layout, paint, or input handling.
 
 **Options considered:**
 - **Option A (chosen) — Dedicated Web Worker:** Move pixel math to a worker thread. Main thread orchestrates via postMessage + transferables.
@@ -312,3 +343,40 @@ Option A reduces the initial bundle to ~14 kB (4.7 kB gzip) — the MediaPipe an
 
 **Revisit when:**
 MediaPipe or the worker chunk grow large enough that the first-start latency becomes noticeable (> 500ms on a slow connection), at which point a preload hint (`<link rel="modulepreload">`) could be added to `index.html` without reverting to eager imports.
+
+---
+
+### ADR-011: Dynamic `asciiWidth` derived from `fontSize` and source width
+
+**Date:** 2026-04-25
+**Status:** Active
+
+**Decision:**
+`asciiWidth` is no longer a fixed default (120). It is computed per-frame from the source image/video width and the user's chosen `fontSize`:
+
+```
+asciiWidth = floor(sourceWidth / (fontSize * 0.6))
+```
+
+The display renders at the fixed `fontSize`; the grid may be wider or narrower than the viewport depending on the source resolution.
+
+**Context:**
+Previously `asciiWidth` was hardcoded to 120 (or 80 for portrait video), and `AsciiDisplay` used a CSS `clamp()` expression to compute the largest font size that would fit those 120 columns in the viewport. Users had no control over detail level — the grid density was fixed regardless of their preference.
+
+**Options considered:**
+- **Option A (chosen) — Derive `asciiWidth` from source width and `fontSize`:** The user controls `fontSize` via a slider (6–20px). `asciiWidth` is computed before each frame is posted to the worker. Smaller fonts = more columns = finer detail. The display uses the exact `fontSize`.
+- **Option B — Derive `asciiWidth` from viewport width and `fontSize`:** `asciiWidth = floor(viewportWidth / (fontSize * 0.6))`. The grid always fits the viewport, but for small source images each character would represent sub-pixel regions.
+- **Option C — Keep fixed `asciiWidth` and make `fontSize` purely visual:** No change to grid density; the slider only changes display scale. Doesn't satisfy the requirement that font size affect detail.
+
+**Reasoning:**
+Option A gives the user direct control over sampling resolution. A 6px font on a 1280px source produces ~355 columns; a 20px font produces ~106. The cell size in source pixels is always `≈ fontSize * 0.6` wide, making the relationship between slider and detail predictable. Option B would create pathological cases where a small source image gets an enormous column count. Option C doesn't solve the problem.
+
+**Tradeoffs:**
+- The ASCII grid width is approximately equal to the source image width. Large sources (e.g., 4K images) at small font sizes may overflow the viewport. The user can increase font size to compensate.
+- The worker receives a variable `asciiWidth` on every frame. On source resolution changes (rare for webcam), the grid dimensions shift once.
+- The portrait-mode `asciiWidth: 80` override was removed; portrait video naturally produces fewer columns because `videoWidth` is smaller.
+
+**Revisit when:**
+User feedback indicates overflow is a consistent problem, at which point a max-width cap or container scaling could be added without changing the derivation formula.
+
+---
