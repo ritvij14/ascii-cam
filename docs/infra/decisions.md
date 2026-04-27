@@ -346,10 +346,41 @@ MediaPipe or the worker chunk grow large enough that the first-start latency bec
 
 ---
 
+### ADR-011: Decouple detail density from display font size
+
+**Date:** 2026-04-26
+**Status:** Active
+
+**Decision:**
+The `fontSize` slider is renamed to **DETAIL** and no longer controls display font size. It represents source pixels per ASCII character. The slider uses a **reversed scale**: **20 = highest detail** (smallest source pixels per char), **2 = lowest detail** (largest source pixels per char). The display auto-computes a `displayFontSize` so the finished ASCII art fills the container naturally — no CSS `scale()` transform is used. A **2px minimum** prevents characters from collapsing entirely into unreadable smudges.
+
+**Context:**
+Previously `fontSize` conflated two concerns: (1) how many characters sampled the source image (`asciiWidth = floor(sourceWidth / (fontSize * 0.6))`), and (2) how large each character appeared on screen. The display used `transform: scale(N)` on the inner `<span>` to fit the grid into the viewport. This created drift artifacts at fractional scale factors and made the slider's behavior unintuitive — a smaller fontSize produced a "wider" image because more columns were generated, but the display zoomed out to compensate.
+
+The initial fix decoupled the two concerns but kept the slider scale direct (higher number = coarser). Users found this confusing: "20 detail" should intuitively mean *more* detail, not less.
+
+**Options considered:**
+- **Option A (chosen) — Reversed DETAIL slider + auto-fitting display + 2px floor:** Slider range 2–20, where 20 = store fontSize 2 (highest detail) and 2 = store fontSize 20 (lowest detail). Mapping: `storeFontSize = 22 - sliderValue`. `asciiWidth = floor(sourceWidth / fontSize)`. `AsciiDisplay` computes `displayFontSize` from container measurements with `Math.max(2, computedSize)` floor. The text fills the container at its natural size; no CSS transform scaling.
+- **Option B — Keep slider as FONT and add separate ZOOM slider:** Two controls: one for detail, one for display scale. More explicit but adds UI complexity.
+- **Option C — Keep existing behavior:** `fontSize` controls both detail and display scale via `transform: scale()`. Simple but produces the drift/jump artifacts users reported.
+
+**Reasoning:**
+Option A is the simplest mental model: "I control how detailed the ASCII is; the app makes it fit the screen." The DETAIL slider directly maps to sampling density — 20 = very fine detail, 2 = blocky. The reversed scale aligns with user intuition (higher number = more detail). The 2px floor prevents characters from collapsing into unreadable single-pixel smudges at extreme detail settings while still allowing ultra-dense output. Option B adds UI complexity for a problem that Option A solves implicitly. Option C was the status quo and the source of user confusion.
+
+**Tradeoffs:**
+- The rendered font size is no longer fixed; it varies with container size and DETAIL setting. Users cannot "lock" a specific pixel font size.
+- At DETAIL 20 on a 720p source, `asciiWidth` reaches ~640 columns. In a typical container the display font size hits the 2px floor, producing a dense pointillist texture rather than readable ASCII characters. This is intentional — users asked for it.
+- `AsciiDisplay` requires a `ResizeObserver` + `requestAnimationFrame` loop to compute `displayFontSize`. This is standard and lightweight.
+
+**Revisit when:**
+Users request a way to zoom or pan the ASCII output independently of detail level, at which point a separate zoom control could be added alongside DETAIL.
+
+---
+
 ### ADR-011: Dynamic `asciiWidth` derived from `fontSize` and source width
 
 **Date:** 2026-04-25
-**Status:** Active
+**Status:** Superseded by ADR-011 (2026-04-26)
 
 **Decision:**
 `asciiWidth` is no longer a fixed default (120). It is computed per-frame from the source image/video width and the user's chosen `fontSize`:
@@ -378,5 +409,36 @@ Option A gives the user direct control over sampling resolution. A 6px font on a
 
 **Revisit when:**
 User feedback indicates overflow is a consistent problem, at which point a max-width cap or container scaling could be added without changing the derivation formula.
+
+---
+
+### ADR-012: Remove histogram equalization and noise filter
+
+**Date:** 2026-04-26
+**Status:** Active
+
+**Decision:**
+Remove histogram equalization and the noise/grain filter from the ASCII conversion pipeline. Only contrast and intensity remain as user-adjustable post-processing controls.
+
+**Context:**
+Histogram equalization was added to spread brightness values across the full [0, 100] range, improving contrast in low-dynamic-range scenes. The noise filter added random ±N offsets to each pixel's RGB channels to simulate film grain. Both were togglable: histogram equalization via a boolean toggle in `ModeControls`, noise via a 0–50 slider.
+
+In practice, histogram equalization over-brightened most webcam scenes — the aggressive CDF stretching pushed midtones too high, producing washed-out output. The user's manual contrast and intensity controls already provide sufficient dynamic-range control without the unpredictability of automatic equalization. The noise filter added visual artifacts (grain) that broke character readability and was rarely used.
+
+**What was removed:**
+- `applyHistogramEqualization()` function from `src/worker/ascii-worker.ts`
+- `histogramEqualization` field from `WorkerConfig`, store state, and both worker postMessage configs
+- `noise` field from `WorkerConfig`, store state, and both worker postMessage configs
+- Noise injection loop inside `processMonochrome` (the only place noise was applied)
+- `HISTOGRAM EQ` toggle button from `ModeControls.tsx`
+- `NOISE` slider from `ModeControls.tsx`
+
+**Tradeoffs accepted:**
+- Scenes with very low dynamic range (e.g., flat lighting) may appear lower-contrast than with equalization. Users can compensate by increasing the `contrast` slider.
+- No film-grain effect is available. This was rarely used and can be replicated externally if needed.
+- The pipeline is simpler: fewer branches, fewer state fields, fewer UI controls.
+
+**Revisit when:**
+A post-processing need arises that contrast/intensity cannot satisfy (e.g., true tone-mapping for HDR sources, or a dithering effect).
 
 ---

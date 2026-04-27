@@ -236,20 +236,7 @@ Stage 2 applies the temporally-smoothed mask to the queued `ImageData` before ca
 
 If segmentation errors, the unmasked frame is used. `updateAsciiOutput` now receives an already-masked `ImageData` and simply checks the mailbox and posts to the worker.
 
-### Step 2 — Noise/grain (optional, worker thread)
-
-If `noise > 0` (range 0–50, default 0), a random value `±noise` is added to each pixel's R, G, B channels before any further processing. This simulates film grain and can help break banding in smooth gradient regions.
-
-```ts
-const n = Math.random() * noise * 2 - noise;
-data[i]     += n;
-data[i + 1] += n;
-data[i + 2] += n;
-```
-
-The `Uint8ClampedArray` auto-clamps to [0, 255]. Noise is applied in-place to the `ImageData` buffer inside the worker so both WebGL and CPU paths receive the noisy pixels.
-
-### Step 3 — White balance (Gray World algorithm, worker thread)
+### Step 2 — White balance (Gray World algorithm, worker thread)
 
 Sample every 4th pixel (every 16th byte) across the frame to compute mean R, G, B:
 
@@ -262,13 +249,13 @@ wbB = grayMean / meanB
 
 This normalizes the average color of the frame to neutral gray, compensating for cast from artificial lighting.
 
-### Step 4 — Color temperature correction
+### Step 3 — Color temperature correction
 
 Detect dominant color temperature from the ratio `(meanR + meanG) / (meanB + 1)`:
 - Ratio > 2.5 → warm light (tungsten/sunset): reduce R by 8%, boost B by 8%
 - Ratio < 1.5 → cool light (fluorescent/overcast): boost R by 8%, reduce B by 8%
 
-### Step 5 — LAB brightness (first pass)
+### Step 4 — LAB brightness (first pass)
 
 For each cell in the ASCII grid:
 1. Average the RGB of all pixels in the cell (cellWidth × cellHeight pixels)
@@ -316,7 +303,7 @@ const height     = Math.floor(imgHeight / cellHeight);
 asciiWidth = Math.floor(sourceWidth / (fontSize * 0.6));
 ```
 
-### Step 6 — Unsharp masking (second pass)
+### Step 5 — Unsharp masking (second pass)
 
 For each cell, compute the average L* of its 3×3 neighborhood (blur), then:
 
@@ -326,7 +313,7 @@ sharpened = original + 0.5 * (original - blurred)
 
 `k = 0.5` is a moderate sharpening strength — enough to make character edges crisp without amplifying noise. Clamped to [0, 100].
 
-### Step 7 — Bayer 4x4 ordered dithering
+### Step 6 — Bayer 4x4 ordered dithering
 
 Before character mapping, Bayer 4x4 ordered dithering is applied to increase the perceived number of brightness levels beyond the character set size:
 
@@ -338,7 +325,7 @@ const dithered = sharpened + bayerThreshold * step;
 
 The Bayer matrix spatially distributes quantization error across a 4×4 tile, creating the illusion of intermediate brightness levels by alternating between adjacent characters. The threshold is centered around zero and scaled to one character step.
 
-### Step 8 — Character mapping
+### Step 7 — Character mapping
 
 ```ts
 const charIndex = Math.max(0, Math.min(charset.length - 1, Math.floor((dithered / 100) * (charset.length - 1))));

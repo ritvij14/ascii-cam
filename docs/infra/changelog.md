@@ -11,6 +11,49 @@
 
 ---
 
+## 2026-04-26 — Remove histogram equalization and noise filter
+
+**Changed:** `src/worker/ascii-worker.ts`, `src/store/index.ts`, `src/components/ModeControls.tsx`, `docs/features/rendering-modes.md`, `docs/features/webcam-ascii.md`, `docs/infra/decisions.md`
+
+**Why:** Histogram equalization over-brightened most webcam scenes — aggressive CDF stretching pushed midtones too high, producing washed-out output. The manual contrast and intensity sliders already provide sufficient dynamic-range control. The noise filter added grain artifacts that broke character readability and was rarely used.
+
+**How:**
+- Deleted `applyHistogramEqualization()` from the worker and removed `histogramEqualization` from `WorkerConfig`, store state, and both worker postMessage configs.
+- Deleted the noise injection loop from `processMonochrome` and removed `noise` from `WorkerConfig`, store state, and both worker postMessage configs.
+- Removed the `HISTOGRAM EQ` toggle button and `NOISE` slider from `ModeControls.tsx`.
+- Updated `rendering-modes.md` and `webcam-ascii.md` to remove references to both features and renumbered pipeline steps.
+- Added ADR-012 documenting the removal rationale.
+
+---
+
+## 2026-04-26 — Reverse DETAIL slider scale and add 2px display font size floor
+
+**Changed:** `src/components/ModeControls.tsx`, `src/components/AsciiDisplay.tsx`, `docs/features/rendering-modes.md`, `docs/infra/decisions.md`
+
+**Why:** The initial DETAIL slider used a direct scale where lower numbers meant more detail. Users found this counterintuitive — "20 detail" should mean more detail than "2 detail". Additionally, at extreme detail settings the browser's font rendering collapsed complex characters into faint smudges, making the output look like opacity had dropped.
+
+**How:**
+- Reversed the slider mapping: `storeFontSize = 22 - sliderValue`. Slider 20 → store fontSize 2 (highest detail). Slider 2 → store fontSize 20 (lowest detail).
+- Added `Math.max(2, computedSize)` floor in `AsciiDisplay` so display font size never drops below 2px. This prevents character shapes from collapsing into unreadable single-pixel artifacts while still allowing ultra-dense ASCII textures.
+- Updated ADR-011 in `decisions.md` to reflect reversed scale and 2px floor.
+
+---
+
+## 2026-04-26 — Decouple detail density from display font size, replace FONT with DETAIL slider
+
+**Changed:** `src/components/AsciiDisplay.tsx`, `src/components/ModeControls.tsx`, `src/store/index.ts`, `docs/features/rendering-modes.md`, `docs/infra/decisions.md`
+
+**Why:** The `fontSize` slider conflated two concerns: (1) how many characters sampled the source image (detail density), and (2) how large each character appeared on screen. The display used `transform: scale(N)` to fit the grid into the viewport, which created drift artifacts at fractional scale factors and made the slider unintuitive — smaller font sizes produced "wider" images because more columns were generated, but the display zoomed out to compensate. Users found this confusing.
+
+**How:**
+- Renamed the slider label from `FONT` to `DETAIL` and removed the `px` suffix. The value now represents source pixels per ASCII character (range 4–20, default 8).
+- Changed `computeAsciiWidth` formula from `floor(sourceWidth / (fontSize * 0.6))` to `floor(sourceWidth / fontSize)` with a 20-column minimum cap.
+- Removed CSS `scale()` transform from `AsciiDisplay`. The inner span now uses only `translate(-50%, -50%)` for centering.
+- Added `displayFontSize` state to `AsciiDisplay` that auto-computes from container measurements via `ResizeObserver`. The text renders at its natural size to fill the container — no transform scaling.
+- Added ADR-011 in `decisions.md` documenting the rationale and tradeoffs.
+
+---
+
 ## 2026-04-25 — Fix ASCII display centering drift by replacing flexbox with absolute positioning
 
 **Changed:** `src/components/AsciiDisplay.tsx`, `docs/features/rendering-modes.md`

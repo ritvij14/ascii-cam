@@ -18,10 +18,8 @@ const ModeControls = ({ onModeChange, onCharsetChange, onFontSizeChange, onInten
   const selectedCharset = useStore((state) => state.selectedCharset);
   const colorMode = useStore((state) => state.colorMode);
   const fontSize = useStore((state) => state.fontSize);
-  const noise = useStore((state) => state.noise);
   const intensity = useStore((state) => state.intensity);
   const contrast = useStore((state) => state.contrast);
-  const histogramEqualization = useStore((state) => state.histogramEqualization);
 
   const [showSettings, setShowSettings] = useState(false);
 
@@ -59,32 +57,20 @@ const ModeControls = ({ onModeChange, onCharsetChange, onFontSizeChange, onInten
           )}
 
           <div className="flex items-center gap-2 w-full">
-            <label className="text-xs text-gray-400 font-mono w-16">FONT</label>
+            <label className="text-xs text-gray-400 font-mono w-16">DETAIL</label>
             <input
               type="range"
-              min={6}
+              min={2}
               max={20}
-              value={fontSize}
+              value={22 - fontSize}
               onChange={(e) => {
-                updateAppState({ fontSize: Number(e.target.value) });
+                const detail = Number(e.target.value);
+                updateAppState({ fontSize: 22 - detail });
                 onFontSizeChange?.();
               }}
               className="flex-1 accent-white"
             />
-            <span className="text-xs text-gray-400 font-mono w-8 text-right">{fontSize}px</span>
-          </div>
-
-          <div className="flex items-center gap-2 w-full">
-            <label className="text-xs text-gray-400 font-mono w-16">NOISE</label>
-            <input
-              type="range"
-              min={0}
-              max={50}
-              value={noise}
-              onChange={(e) => updateAppState({ noise: Number(e.target.value) })}
-              className="flex-1 accent-white"
-            />
-            <span className="text-xs text-gray-400 font-mono w-8 text-right">{noise}</span>
+            <span className="text-xs text-gray-400 font-mono w-8 text-right">{22 - fontSize}</span>
           </div>
 
           <div className="flex items-center gap-2 w-full">
@@ -121,17 +107,6 @@ const ModeControls = ({ onModeChange, onCharsetChange, onFontSizeChange, onInten
             <span className="text-xs text-gray-400 font-mono w-8 text-right">{contrast.toFixed(1)}</span>
           </div>
 
-          <button
-            onClick={() => updateAppState({ histogramEqualization: !histogramEqualization })}
-            className={buttonBase}
-            style={{
-              backgroundColor: histogramEqualization ? "#ffffff" : "rgba(31,41,55,0.8)",
-              color: histogramEqualization ? "#000" : "#9ca3af",
-              border: `1px solid ${histogramEqualization ? "#ffffff" : "#374151"}`,
-            }}
-          >
-            HISTOGRAM EQ
-          </button>
         </div>
       )}
 

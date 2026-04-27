@@ -6,21 +6,17 @@ const AsciiDisplay = () => {
   const coloredAsciiOutput = useStore((state) => state.coloredAsciiOutput);
   const asciiColor = useStore((state) => state.asciiColor);
   const colorMode = useStore((state) => state.colorMode);
-  const fontSize = useStore((state) => state.fontSize);
 
   const preRef = useRef<HTMLPreElement>(null);
   const [contentNode, setContentNode] = useState<HTMLSpanElement | null>(null);
-  const [scale, setScale] = useState(1);
-  const lastLoggedFontSize = useRef<number | null>(null);
-  const lastLoggedContentH = useRef<number>(0);
-  const logSeq = useRef(0);
+  const [displayFontSize, setDisplayFontSize] = useState(10);
 
   useEffect(() => {
     const pre = preRef.current;
     if (!pre || !contentNode) return;
 
     let rafId = 0;
-    const computeScale = () => {
+    const compute = () => {
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         const cw = pre.clientWidth;
@@ -28,82 +24,29 @@ const AsciiDisplay = () => {
         const contentW = contentNode.scrollWidth;
         const contentH = contentNode.scrollHeight;
         if (contentW === 0 || contentH === 0) return;
-        const newScale = Math.min(cw / contentW, ch / contentH);
-        setScale(newScale);
 
-        const isFontSizeChange = lastLoggedFontSize.current !== fontSize;
-        const isRealContent = contentH > 50;
-        const isContentGrowth =
-          Math.abs(contentH - lastLoggedContentH.current) > 50;
+        const text = colorMode === "color" ? coloredAsciiOutput : asciiOutput;
+        if (!text) return;
 
-        if (isFontSizeChange || (isRealContent && isContentGrowth)) {
-          lastLoggedFontSize.current = fontSize;
-          if (isRealContent) lastLoggedContentH.current = contentH;
-          logSeq.current += 1;
+        const scale = Math.min(cw / contentW, ch / contentH);
+        const nextFontSize = Math.max(2, displayFontSize * scale);
 
-          const preRect = pre.getBoundingClientRect();
-          const spanRect = contentNode.getBoundingClientRect();
-          const computedTransform =
-            window.getComputedStyle(contentNode).transform;
-
-          const driftX =
-            spanRect.left -
-            preRect.left +
-            spanRect.width / 2 -
-            preRect.width / 2;
-          const driftY =
-            spanRect.top -
-            preRect.top +
-            spanRect.height / 2 -
-            preRect.height / 2;
-
-          const text = colorMode === "color" ? coloredAsciiOutput : asciiOutput;
-          const lines = text.split("\n").length;
-
-          console.log(
-            "ASCII_CENTER_DEBUG",
-            JSON.stringify({
-              seq: logSeq.current,
-              reason: isFontSizeChange ? "fontSize_change" : "content_growth",
-              fontSize,
-              scale: newScale,
-              pre: {
-                clientW: cw,
-                clientH: ch,
-                rectW: preRect.width,
-                rectH: preRect.height,
-              },
-              content: {
-                scrollW: contentW,
-                scrollH: contentH,
-                offsetW: contentNode.offsetWidth,
-                offsetH: contentNode.offsetHeight,
-              },
-              span: { rectW: spanRect.width, rectH: spanRect.height },
-              drift: {
-                x: Math.round(driftX * 100) / 100,
-                y: Math.round(driftY * 100) / 100,
-              },
-              transform: computedTransform,
-              outputLines: lines,
-              outputLen: text.length,
-              mode: colorMode,
-            })
-          );
+        if (Math.abs(nextFontSize - displayFontSize) > 0.5) {
+          setDisplayFontSize(nextFontSize);
         }
       });
     };
 
-    const ro = new ResizeObserver(computeScale);
+    const ro = new ResizeObserver(compute);
     ro.observe(pre);
     ro.observe(contentNode);
-    computeScale();
+    compute();
 
     return () => {
       ro.disconnect();
       cancelAnimationFrame(rafId);
     };
-  }, [contentNode, fontSize]);
+  }, [contentNode, displayFontSize, asciiOutput, coloredAsciiOutput, colorMode]);
 
   return (
     <pre
@@ -118,10 +61,8 @@ const AsciiDisplay = () => {
           ref={setContentNode}
           className="absolute top-1/2 left-1/2 whitespace-pre leading-none"
           style={{
-            fontSize: coloredAsciiOutput ? `${fontSize}px` : "24px",
-            transform: coloredAsciiOutput
-              ? `translate(-50%, -50%) scale(${scale})`
-              : "translate(-50%, -50%)",
+            fontSize: coloredAsciiOutput ? `${displayFontSize}px` : "24px",
+            transform: "translate(-50%, -50%)",
           }}
           dangerouslySetInnerHTML={{
             __html: coloredAsciiOutput || "ASCII output will appear here...",
@@ -132,10 +73,8 @@ const AsciiDisplay = () => {
           ref={setContentNode}
           className="absolute top-1/2 left-1/2 whitespace-pre leading-none"
           style={{
-            fontSize: asciiOutput ? `${fontSize}px` : "24px",
-            transform: asciiOutput
-              ? `translate(-50%, -50%) scale(${scale})`
-              : "translate(-50%, -50%)",
+            fontSize: asciiOutput ? `${displayFontSize}px` : "24px",
+            transform: "translate(-50%, -50%)",
           }}
         >
           {asciiOutput || "ASCII output will appear here..."}

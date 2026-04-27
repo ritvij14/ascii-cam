@@ -32,10 +32,8 @@ interface AppState {
 
   // Depth control state
   fontSize: number;
-  noise: number;
   intensity: number;
   contrast: number;
-  histogramEqualization: boolean;
 
   // Image tab
   uploadedImage: string | null; // base64 data URL
@@ -78,7 +76,7 @@ interface AppActions {
 type AppStore = AppState & AppActions;
 
 const computeAsciiWidth = (sourceWidth: number, fontSize: number): number =>
-  Math.max(1, Math.floor(sourceWidth / (fontSize * 0.6)));
+  Math.max(20, Math.floor(sourceWidth / fontSize));
 
 export const useStore = create<AppStore>((set, get) => {
   // Single-slot segmentation queue: Stage 1 writes, Stage 2 reads.
@@ -133,11 +131,9 @@ export const useStore = create<AppStore>((set, get) => {
   colorMode: 'monochrome',
 
   // Depth control defaults
-  fontSize: 12,
-  noise: 0,
+  fontSize: 8,
   intensity: 1.0,
   contrast: 1.0,
-  histogramEqualization: true,
 
   uploadedImage: null,
   asciiWorker: null,
@@ -209,25 +205,25 @@ export const useStore = create<AppStore>((set, get) => {
   },
 
   updateAsciiOutput: (imageData) => {
-    const { workerBusy, fontSize, selectedCharset, asciiColor, contrast, intensity, noise, histogramEqualization } = get();
+    const { workerBusy, fontSize, selectedCharset, asciiColor, contrast, intensity } = get();
     if (workerBusy) return;
     const asciiWidth = computeAsciiWidth(imageData.width, fontSize);
     set({ asciiWidth, workerBusy: true });
     workerPostTime = performance.now();
     getWorker().postMessage(
-      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'monochrome', asciiColor, contrast, intensity, noise, histogramEqualization } },
+      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'monochrome', asciiColor, contrast, intensity } },
       [imageData.data.buffer]
     );
   },
 
   updateColorAsciiOutput: (imageData) => {
-    const { workerBusy, fontSize, selectedCharset, asciiColor, contrast, intensity, noise, histogramEqualization } = get();
+    const { workerBusy, fontSize, selectedCharset, asciiColor, contrast, intensity } = get();
     if (workerBusy) return;
     const asciiWidth = computeAsciiWidth(imageData.width, fontSize);
     set({ asciiWidth, workerBusy: true });
     workerPostTime = performance.now();
     getWorker().postMessage(
-      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'color', asciiColor, contrast, intensity, noise, histogramEqualization } },
+      { type: 'process', imageData, config: { asciiWidth, selectedCharset, colorMode: 'color', asciiColor, contrast, intensity } },
       [imageData.data.buffer]
     );
   },
@@ -444,7 +440,7 @@ export const useStore = create<AppStore>((set, get) => {
   },
 
   takeScreenshot: async () => {
-    const { colorMode, asciiOutput, coloredAsciiOutput, asciiColor, selectedCharset } = get();
+    const { colorMode, asciiOutput, coloredAsciiOutput, asciiColor } = get();
 
     set({ screenshotLoading: true });
     const canvas = document.createElement('canvas');

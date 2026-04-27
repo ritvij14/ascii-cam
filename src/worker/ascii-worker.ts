@@ -9,8 +9,6 @@ export interface WorkerConfig {
   asciiColor: string;
   contrast: number;
   intensity: number;
-  noise: number;
-  histogramEqualization: boolean;
 }
 
 export interface WorkerInput {
@@ -337,54 +335,14 @@ function initWebGL(): WebGLResources | null {
 glResources = initWebGL();
 
 
-const applyHistogramEqualization = (brightness: Float32Array): void => {
-  const bins = 256;
-  const hist = new Uint32Array(bins);
-
-  for (let i = 0; i < brightness.length; i++) {
-    const bin = Math.min(bins - 1, Math.max(0, Math.floor((brightness[i] / 100) * (bins - 1))));
-    hist[bin]++;
-  }
-
-  const cdf = new Uint32Array(bins);
-  cdf[0] = hist[0];
-  let cdfMin = 0;
-  let foundMin = false;
-
-  for (let i = 1; i < bins; i++) {
-    cdf[i] = cdf[i - 1] + hist[i];
-    if (!foundMin && hist[i] > 0) {
-      cdfMin = cdf[i];
-      foundMin = true;
-    }
-  }
-
-  const total = brightness.length;
-  if (!foundMin || cdfMin === total) return;
-
-  const scale = 100 / (total - cdfMin);
-  for (let i = 0; i < brightness.length; i++) {
-    const bin = Math.min(bins - 1, Math.max(0, Math.floor((brightness[i] / 100) * (bins - 1))));
-    brightness[i] = (cdf[bin] - cdfMin) * scale;
-  }
-};
 
 const processMonochrome = (
   imageData: ImageData,
   config: WorkerConfig
 ): string => {
   const charset = (CHARACTER_SETS[config.selectedCharset] ?? CHARACTER_SETS['STANDARD']).characters;
-  const { asciiWidth, contrast, intensity, noise, histogramEqualization } = config;
+  const { asciiWidth, contrast, intensity } = config;
   const { data, width: imgWidth, height: imgHeight } = imageData;
-
-  if (noise > 0) {
-    for (let i = 0; i < data.length; i += 4) {
-      const n = Math.random() * noise * 2 - noise;
-      data[i] += n;
-      data[i + 1] += n;
-      data[i + 2] += n;
-    }
-  }
 
   const cellWidth = Math.floor(imgWidth / asciiWidth);
   const cellHeight = Math.floor(cellWidth * 2);
@@ -484,10 +442,6 @@ const processMonochrome = (
     }
   }
 
-  if (histogramEqualization) {
-    applyHistogramEqualization(cellBrightness);
-  }
-
   // Apply contrast and intensity multiplier
   for (let i = 0; i < cellBrightness.length; i++) {
     const normalized = cellBrightness[i] / 100;
@@ -536,7 +490,7 @@ const processColor = (
   config: WorkerConfig
 ): string => {
   const charset = (CHARACTER_SETS[config.selectedCharset] ?? CHARACTER_SETS['STANDARD']).characters;
-  const { asciiWidth, contrast, intensity, histogramEqualization } = config;
+  const { asciiWidth, contrast, intensity } = config;
   const { data, width: imgWidth, height: imgHeight } = imageData;
 
   const cellWidth = Math.floor(imgWidth / asciiWidth);
@@ -577,10 +531,6 @@ const processColor = (
       cellB[idx] = totalB / pixelCount;
       cellBrightness[idx] = totalL / pixelCount;
     }
-  }
-
-  if (histogramEqualization) {
-    applyHistogramEqualization(cellBrightness);
   }
 
   // Apply contrast and intensity multiplier
