@@ -3,7 +3,7 @@
 > **Feature doc for the two rendering modes: monochrome and color.**
 > Covers mode switching, per-mode output pipeline, color post-processing, edge detection, and component rendering.
 > Status: Stable
-> Last updated: 2026-04-26 (Decouple detail density from display font size — DETAIL slider replaces FONT, display auto-fits without CSS scale transform)
+> Last updated: 2026-04-27 (WebGL offload for color mode — per-pixel LAB L* computed in GPU shader, same pipeline reused for monochrome and color)
 
 ---
 
@@ -105,7 +105,22 @@ Four `Float32Array` buffers are allocated for the full grid (`asciiWidth × heig
 - `cellR`, `cellG`, `cellB` — average RGB of each cell
 - `cellBrightness` — average LAB L* of each cell
 
-All four values are computed in a single nested loop over cell pixels to avoid a second full-image scan.
+**WebGL offload (preferred path)**
+
+When `OffscreenCanvas` + WebGL2 are available, the worker renders directly to a cell-grid-sized framebuffer (`asciiWidth × height`). The fragment shader computes per-pixel RGB + LAB L* inside nested loops over each cell's source pixel region, accumulates the sums, and outputs the averages:
+
+- Fragment shader mode uniform `uMode = 1`
+- Per fragment: `cellX = gl_FragCoord.x`, `cellY = gl_FragCoord.y`
+- Sample every source pixel in `[cellX·cellWidth, cellY·cellHeight)` via `texture()`
+- Accumulate `sumR`, `sumG`, `sumB`, `sumL` in GLSL; divide by `count`
+- Output: `vec4(avgR, avgG, avgB, avgL/100)`
+- `gl.readPixels()` reads the cell grid only (~28 KB at typical detail, vs ~3.7 MB for full 720p frame)
+
+This eliminates both the per-pixel `Math.pow` + `Math.cbrt` bottleneck **and** the CPU cell-averaging loop (~1M pixel visits per frame).
+
+**CPU fallback**
+
+On browsers without OffscreenCanvas WebGL support (Safari < 16.4), the nested pixel loop calls `rgbToLabL()` in JavaScript per pixel and averages per cell on CPU as before.
 
 ### Step 3 — Second pass: character selection + color post-processing
 
@@ -143,17 +158,21 @@ Color mode applies the same contrast and intensity steps to `cellBrightness` bef
 
 After sharpening, two transformations lift the colors from the typically muted/gray webcam output:
 
-**Gamma lift** (`gamma = 0.55`) — brightens dark midtones without blowing out highlights:
+**Gamma lift** (`gamma = 0.55`) — brightens dark midtones without blowing out highlights. Applied via a precomputed `GAMMA_TABLE[256]` lookup instead of per-cell `Math.pow`, eliminating ~345,000 transcendental calls per frame at high detail:
 ```ts
-cr = Math.pow(cr, 0.55);  // applied to normalized [0, 1] channels
+cr = GAMMA_TABLE[Math.round(sR)];  // sR is in [0, 255]
 ```
 
-**HSL saturation boost** (1.5× saturation) — converts to HSL, multiplies `s` by 1.5 (clamped at 1), converts back to RGB:
+**RGB chroma boost** (1.5×) — luminance-preserving saturation increase without the expensive HSL round-trip. Each channel is moved away from the gray midpoint by 1.5×, then clamped:
 ```ts
-const s = Math.min(1, (d / (1 - Math.abs(2 * l - 1))) * 1.5);
+const mid = (cr + cg + cb) / 3;
+const boost = 1.5;
+cr = clamp(mid + (cr - mid) * boost, 0, 1);
+cg = clamp(mid + (cg - mid) * boost, 0, 1);
+cb = clamp(mid + (cb - mid) * boost, 0, 1);
 ```
 
-This is applied only when the cell has non-zero chroma (`d > 0`). Near-gray cells are passed through unchanged.
+This replaces the previous full HSL→RGB conversion (15+ transcendental operations per cell) with 3 subtractions, 3 multiplications, and 3 clamps — visually similar but ~5× faster.
 
 ### Step 5 — HTML span output
 
@@ -163,6 +182,8 @@ Each character is emitted as:
 ```
 
 Where `#rrggbb` is the hex representation of the post-processed RGB. Row boundaries are `\n`. The full output is joined into `coloredAsciiOutput`.
+
+**Hex lookup table** — To avoid creating ~345,000 temporary strings per frame at high detail, the worker precomputes a `HEX_TABLE[256]` once at module load (e.g., `HEX_TABLE[255] = 'ff'`). Per-cell formatting becomes three array lookups: `HEX_TABLE[Math.round(cr * 255)]`, eliminating all `toString(16).padStart(2, '0')` allocations from the hot loop.
 
 ---
 

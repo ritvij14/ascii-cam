@@ -11,6 +11,87 @@
 
 ---
 
+## 2026-04-28 — Replace expensive HSL saturation boost with luminance-preserving RGB chroma boost
+
+**Changed:** `src/worker/ascii-worker.ts`, `docs/features/rendering-modes.md`
+
+**Why:** After gamma and hex table optimizations, color mode remained sluggish at high detail. Profiling showed the full HSL→RGB round-trip (cmax/cmin, hue calculation, sector lookup, clamping) was the last major per-cell bottleneck — ~15+ operations per cell at high detail.
+
+**How:**
+- Replaced the HSL conversion with a simple RGB chroma boost: each channel is moved away from the gray midpoint by 1.5×, then clamped to [0, 1].
+- This preserves luminance (the gray midpoint stays fixed) while increasing saturation, producing visually similar results.
+- Eliminates `Math.abs`, division, modulo, `Math.floor`, and the large ternary sector table from the hot loop.
+- Updated `rendering-modes.md` Step 4 documentation to describe the new approach.
+
+---
+
+## 2026-04-28 — Precompute gamma lookup table to eliminate Math.pow calls in color mode
+
+**Changed:** `src/worker/ascii-worker.ts`, `docs/features/rendering-modes.md`
+
+**Why:** After the hex table optimization, color mode was still slow at high detail. Profiling showed `Math.pow(cr, 0.55)` × 3 per cell remained a significant cost — ~345,000 transcendental function calls per frame at max detail.
+
+**How:**
+- Added `GAMMA_TABLE[256]` (Float32Array), precomputed once at module load with `Math.pow(i / 255, 0.55)` for every 0–255 byte value.
+- Replaced per-cell `Math.pow(sR / 255, 0.55)` with `GAMMA_TABLE[Math.round(sR)]` — a single array lookup per channel.
+- Preserves exact visual output (same mathematical result, just precomputed) and works for both WebGL and CPU fallback paths.
+
+---
+
+## 2026-04-28 — Precompute hex lookup table to eliminate string allocations in color mode output
+
+**Changed:** `src/worker/ascii-worker.ts`, `docs/features/rendering-modes.md`
+
+**Why:** At high detail settings (fontSize ≤ 6), color mode produces ~115,000 cells per frame. Formatting each cell's color into `#rrggbb` via `toString(16).padStart(2, '0')` created ~345,000 temporary strings per frame, causing severe GC pressure and frame drops.
+
+**How:**
+- Added `HEX_TABLE[256]`, precomputed once at module load, mapping every 0–255 byte to its two-character hex string.
+- Replaced per-cell `Math.round(cr * 255).toString(16).padStart(2, '0')` with `HEX_TABLE[Math.round(cr * 255)]` — a single array lookup per channel.
+
+## 2026-04-28 — Fix monochrome blank screen and upside-down output in WebGL shader
+
+**Changed:** `src/worker/ascii-worker.ts`
+
+**Why:** After the GPU cell-averaging refactor, monochrome mode showed a blank black screen and both modes rendered upside-down.
+
+**How:**
+- **Monochrome blank screen** — `rgbToLum()` returns values in `[0, 1]`, but the shader was dividing by 100 before writing to RGBA8: `vec4(avgL / 100.0, ...)`. This collapsed every brightness value to 0–2 on the byte scale, which the CPU read back as near-zero. Fixed by outputting `vec4(avgL, avgL, avgL, 1.0)` in mode 0, matching the old monochrome shader encoding.
+- **Upside-down output** — The shader introduced `cellY = uGridHeight - 1 - int(gl_FragCoord.y)` to flip rows, but the vertex texture coordinates already flip Y (`vTexCoord.y=0` → top of image). The double flip produced upside-down output. Fixed by removing the Y-flip: `cellY = int(gl_FragCoord.y)`. The existing texture-coordinate flip is sufficient.
+
+---
+
+## 2026-04-28 — GPU cell averaging — render directly to ASCII grid dimensions
+
+**Changed:** `src/worker/ascii-worker.ts`, `docs/features/rendering-modes.md`, `docs/infra/decisions.md`
+
+**Why:** After offloading `rgbToLabL()` to the GPU (2026-04-27), color mode was still "very slow." The remaining bottlenecks were `gl.readPixels()` reading the full 720p frame (~3.7 MB per frame) and the CPU cell-averaging loop (~1M pixel visits per frame).
+
+**How:**
+- Extended the fragment shader so each output fragment represents one ASCII cell. Inside the shader, each fragment loops over its source pixel region, accumulates RGB + Lab L*, and outputs the average directly.
+- Render target changed from source dimensions (`imgWidth × imgHeight`) to cell-grid dimensions (`asciiWidth × height`).
+- `gl.readPixels()` now reads ~28 KB instead of ~3.7 MB — a ~130× bandwidth reduction at typical detail settings.
+- CPU no longer has a cell-averaging loop in either monochrome or color mode when WebGL is available. It receives pre-averaged `cellR`, `cellG`, `cellB`, and `cellBrightness` arrays directly.
+- `computeWithWebGL()` signature extended with `asciiWidth`, `cellWidth`, `cellHeight`, and `gridHeight`. Returns `{ cellR?, cellG?, cellB?, cellBrightness }` instead of raw pixel arrays.
+- Added ADR-014 documenting the decision.
+
+---
+
+## 2026-04-27 — WebGL offload for color mode (shared GPU pipeline)
+
+**Changed:** `src/worker/ascii-worker.ts`, `docs/features/rendering-modes.md`, `docs/infra/decisions.md`
+
+**Why:** Color mode was extremely slow compared to monochrome. Profiling showed the bottleneck was `rgbToLabL()` inside the per-cell pixel-averaging loop in `processColor()` — ~900,000 sequential `Math.pow` + `Math.cbrt` calls per 720p frame. Monochrome already offloaded luminance to a GPU shader (ADR-008), but color mode ignored this infrastructure and ran entirely on CPU.
+
+**How:**
+- Extended the existing fragment shader with a `uMode` uniform: mode 0 outputs `vec4(lum, lum, lum, 1.0)` (monochrome), mode 1 outputs `vec4(r, g, b, lum/100)` (color, packing RGB and LAB L*).
+- Added `rgbToLabL()` directly in GLSL so the GPU computes the expensive per-pixel math in parallel.
+- Renamed `computeBrightnessWithWebGL` to `computeWithWebGL` and made it accept a `mode` parameter; returns `{ rgba: Uint8Array, brightness: Float32Array }`.
+- `processColor` now calls `computeWithWebGL(..., 1)` and reads RGB from RGB channels + LAB L* from alpha channel. CPU fallback (original slow path) preserved for Safari < 16.4.
+- Updated `rendering-modes.md` Color Mode section to document the WebGL offload path and CPU fallback.
+- Added ADR-013 documenting the architectural decision to extend the monochrome shader for color mode.
+
+---
+
 ## 2026-04-26 — Remove histogram equalization and noise filter
 
 **Changed:** `src/worker/ascii-worker.ts`, `src/store/index.ts`, `src/components/ModeControls.tsx`, `docs/features/rendering-modes.md`, `docs/features/webcam-ascii.md`, `docs/infra/decisions.md`

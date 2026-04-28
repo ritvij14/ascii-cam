@@ -51,50 +51,63 @@ interface WhiteBalanceParams {
   tempCorrB: number;
 }
 
+interface WebGLResult {
+  cellR?: Float32Array;
+  cellG?: Float32Array;
+  cellB?: Float32Array;
+  cellBrightness: Float32Array;
+}
+
 /**
- * Use WebGL to compute per-pixel luminosity values.
- * Returns a Float32Array where each element is the luminosity (0-100) for that pixel.
+ * Use WebGL to compute per-cell averaged values.
+ * Mode 0 (monochrome): returns cellBrightness only (red channel = lum/100).
+ * Mode 1 (color): returns cellR, cellG, cellB, cellBrightness (alpha = lum/100).
  */
-function computeBrightnessWithWebGL(
+function computeWithWebGL(
   imageData: ImageData,
-  width: number,
-  height: number,
-  wb: WhiteBalanceParams
-): Float32Array | null {
+  imgWidth: number,
+  imgHeight: number,
+  wb: WhiteBalanceParams,
+  mode: 0 | 1,
+  asciiWidth: number,
+  cellWidth: number,
+  cellHeight: number,
+  gridHeight: number
+): WebGLResult | null {
   if (!glResources) {
-    console.log('[WebGL] No GL resources, returning null');
+    return null;
+  }
+
+  if (asciiWidth <= 0 || gridHeight <= 0) {
     return null;
   }
 
   const { gl, canvas, texture, framebuffer, program, vao } = glResources;
 
-  // Resize canvas to match image dimensions
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = asciiWidth;
+  canvas.height = gridHeight;
 
-  // Upload image data to texture
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.texImage2D(
     gl.TEXTURE_2D,
-    0,                // level
-    gl.RGBA,          // internal format
-    width,
-    height,
-    0,                // border
-    gl.RGBA,          // format
-    gl.UNSIGNED_BYTE, // type
+    0,
+    gl.RGBA,
+    imgWidth,
+    imgHeight,
+    0,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
     imageData.data
   );
 
-  // Set up framebuffer with RGBA8 texture as render target
   const renderTexture = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, renderTexture);
   gl.texImage2D(
     gl.TEXTURE_2D,
     0,
     gl.RGBA8,
-    width,
-    height,
+    asciiWidth,
+    gridHeight,
     0,
     gl.RGBA,
     gl.UNSIGNED_BYTE,
@@ -116,64 +129,74 @@ function computeBrightnessWithWebGL(
 
   const fbStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
   if (fbStatus !== gl.FRAMEBUFFER_COMPLETE) {
-    console.warn('[WebGL] Framebuffer incomplete, status:', fbStatus);
     gl.deleteTexture(renderTexture);
     return null;
   }
 
-  // Set viewport and clear
-  gl.viewport(0, 0, width, height);
+  gl.viewport(0, 0, asciiWidth, gridHeight);
   gl.clearColor(0, 0, 0, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  // Use shader program
   gl.useProgram(program);
 
-  // Set white balance uniforms
   const uWhiteBalanceLoc = gl.getUniformLocation(program, 'uWhiteBalance');
   const uColorTempLoc = gl.getUniformLocation(program, 'uColorTemp');
   const uTextureLoc = gl.getUniformLocation(program, 'uTexture');
+  const uModeLoc = gl.getUniformLocation(program, 'uMode');
+  const uSourceWidthLoc = gl.getUniformLocation(program, 'uSourceWidth');
+  const uSourceHeightLoc = gl.getUniformLocation(program, 'uSourceHeight');
+  const uCellWidthLoc = gl.getUniformLocation(program, 'uCellWidth');
+  const uCellHeightLoc = gl.getUniformLocation(program, 'uCellHeight');
+  const uAsciiWidthLoc = gl.getUniformLocation(program, 'uAsciiWidth');
+  const uGridHeightLoc = gl.getUniformLocation(program, 'uGridHeight');
+
   gl.uniform3f(uWhiteBalanceLoc, wb.wbR, wb.wbG, wb.wbB);
   gl.uniform3f(uColorTempLoc, wb.tempCorrR, wb.tempCorrG, wb.tempCorrB);
   gl.uniform1i(uTextureLoc, 0);
+  gl.uniform1i(uModeLoc, mode);
+  gl.uniform1i(uSourceWidthLoc, imgWidth);
+  gl.uniform1i(uSourceHeightLoc, imgHeight);
+  gl.uniform1i(uCellWidthLoc, cellWidth);
+  gl.uniform1i(uCellHeightLoc, cellHeight);
+  gl.uniform1i(uAsciiWidthLoc, asciiWidth);
+  gl.uniform1i(uGridHeightLoc, gridHeight);
 
-  // Bind texture to unit 0
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, texture);
 
-  // Draw fullscreen quad
   gl.bindVertexArray(vao);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   gl.bindVertexArray(null);
 
-  // Check for draw errors
-  const drawError = gl.getError();
-  if (drawError !== gl.NO_ERROR) {
-    console.warn('[WebGL] Draw error:', drawError);
+  const cellCount = asciiWidth * gridHeight;
+  const pixels = new Uint8Array(cellCount * 4);
+  gl.readPixels(0, 0, asciiWidth, gridHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+  const cellBrightness = new Float32Array(cellCount);
+
+  if (mode === 0) {
+    for (let i = 0, j = 0; i < pixels.length; i += 4, j++) {
+      cellBrightness[j] = (pixels[i] / 255) * 100;
+    }
+  } else {
+    const cellR = new Float32Array(cellCount);
+    const cellG = new Float32Array(cellCount);
+    const cellB = new Float32Array(cellCount);
+    for (let i = 0, j = 0; i < pixels.length; i += 4, j++) {
+      cellR[j] = pixels[i];
+      cellG[j] = pixels[i + 1];
+      cellB[j] = pixels[i + 2];
+      cellBrightness[j] = (pixels[i + 3] / 255) * 100;
+    }
+    gl.deleteTexture(renderTexture);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { cellR, cellG, cellB, cellBrightness };
   }
 
-  // Read pixels back
-  const pixels = new Uint8Array(width * height * 4);
-  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-
-  // Convert to Float32Array of luminosity values (0-100)
-  const brightness = new Float32Array(width * height);
-  for (let i = 0, j = 0; i < pixels.length; i += 4, j++) {
-    brightness[j] = (pixels[i] / 255) * 100;
-  }
-
-  // Log min/max brightness
-  let minB = 100, maxB = 0;
-  for (let i = 0; i < brightness.length; i++) {
-    if (brightness[i] < minB) minB = brightness[i];
-    if (brightness[i] > maxB) maxB = brightness[i];
-  }
-
-  // Cleanup render texture
   gl.deleteTexture(renderTexture);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-  return brightness;
+  return { cellBrightness };
 }
 
 // Vertex shader: fullscreen quad with texture coordinates
@@ -191,7 +214,9 @@ void main() {
 }
 `;
 
-// Fragment shader: RGB -> luminosity grayscale with white balance
+// Fragment shader: per-cell average of source pixels
+// Mode 0 (monochrome): outputs vec4(lum/100, lum/100, lum/100, 1.0)
+// Mode 1 (color): outputs vec4(avgR, avgG, avgB, lum/100)
 const fragmentShaderSource = `#version 300 es
   precision highp float;
 
@@ -201,6 +226,13 @@ const fragmentShaderSource = `#version 300 es
   uniform sampler2D uTexture;
   uniform vec3 uWhiteBalance;
   uniform vec3 uColorTemp;
+  uniform int uMode;
+  uniform int uSourceWidth;
+  uniform int uSourceHeight;
+  uniform int uCellWidth;
+  uniform int uCellHeight;
+  uniform int uAsciiWidth;
+  uniform int uGridHeight;
 
   float rgbToLum(vec3 rgb) {
     vec3 corrected = clamp(rgb * uWhiteBalance * uColorTemp, 0.0, 1.0);
@@ -208,10 +240,71 @@ const fragmentShaderSource = `#version 300 es
     return lum;
   }
 
+  float srgbToLinear(float c) {
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+  }
+
+  float rgbToLabL(vec3 rgb) {
+    float y = 0.2126 * srgbToLinear(rgb.r) + 0.7152 * srgbToLinear(rgb.g) + 0.0722 * srgbToLinear(rgb.b);
+    return y > 0.008856 ? 116.0 * pow(y, 1.0 / 3.0) - 16.0 : 903.3 * y;
+  }
+
   void main() {
-    vec4 color = texture(uTexture, vTexCoord);
-    float lum = rgbToLum(color.rgb);
-    fragColor = vec4(lum, lum, lum, 1.0);
+    int cellX = int(gl_FragCoord.x);
+    int cellY = int(gl_FragCoord.y);
+
+    int sx_start = cellX * uCellWidth;
+    int sy_start = cellY * uCellHeight;
+
+    int maxDx = uCellWidth;
+    int maxDy = uCellHeight;
+    if (sx_start + maxDx > uSourceWidth) maxDx = uSourceWidth - sx_start;
+    if (sy_start + maxDy > uSourceHeight) maxDy = uSourceHeight - sy_start;
+    if (maxDx < 0) maxDx = 0;
+    if (maxDy < 0) maxDy = 0;
+
+    float sumR = 0.0;
+    float sumG = 0.0;
+    float sumB = 0.0;
+    float sumL = 0.0;
+    int count = 0;
+
+    for (int dy = 0; dy < 128; dy++) {
+      if (dy >= maxDy) break;
+      for (int dx = 0; dx < 128; dx++) {
+        if (dx >= maxDx) break;
+        vec2 sampleCoord = vec2(
+          float(sx_start + dx) + 0.5,
+          float(sy_start + dy) + 0.5
+        ) / vec2(float(uSourceWidth), float(uSourceHeight));
+        vec4 color = texture(uTexture, sampleCoord);
+        sumR += color.r;
+        sumG += color.g;
+        sumB += color.b;
+        if (uMode == 0) {
+          sumL += rgbToLum(color.rgb);
+        } else {
+          sumL += rgbToLabL(color.rgb);
+        }
+        count++;
+      }
+    }
+
+    if (count == 0) {
+      fragColor = vec4(0.0, 0.0, 0.0, 0.0);
+      return;
+    }
+
+    float avgR = sumR / float(count);
+    float avgG = sumG / float(count);
+    float avgB = sumB / float(count);
+    float avgL = sumL / float(count);
+
+    if (uMode == 0) {
+      fragColor = vec4(avgL, avgL, avgL, 1.0);
+    } else {
+      fragColor = vec4(avgR, avgG, avgB, avgL / 100.0);
+    }
   }
   `;
 
@@ -387,26 +480,12 @@ const processMonochrome = (
   const webglAvailable = useWebGL();
 
   if (webglAvailable) {
-    // WebGL path: compute per-pixel brightness on GPU (with white balance), then average cells on CPU
-    const pixelBrightness = computeBrightnessWithWebGL(imageData, imgWidth, imgHeight, {
+    const result = computeWithWebGL(imageData, imgWidth, imgHeight, {
       wbR, wbG, wbB, tempCorrR, tempCorrG, tempCorrB
-    });
+    }, 0, asciiWidth, cellWidth, cellHeight, height);
 
-    if (pixelBrightness) {
-      // WebGL already applied white balance and color temp correction
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < asciiWidth; x++) {
-          const idx = y * asciiWidth + x;
-          let totalL = 0, pixelCount = 0;
-          for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight && cy < imgHeight; cy++) {
-            for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth && cx < imgWidth; cx++) {
-              totalL += pixelBrightness[cy * imgWidth + cx];
-              pixelCount++;
-            }
-          }
-          cellBrightness[idx] = totalL / pixelCount;
-        }
-      }
+    if (result) {
+      cellBrightness.set(result.cellBrightness);
     } else {
       // WebGL failed - fall back to CPU
       for (let y = 0; y < height; y++) {
@@ -512,24 +591,62 @@ const processColor = (
   const cellB = new Float32Array(asciiWidth * height);
   const cellBrightness = new Float32Array(asciiWidth * height);
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < asciiWidth; x++) {
-      const idx = y * asciiWidth + x;
-      let totalR = 0, totalG = 0, totalB = 0, totalL = 0, pixelCount = 0;
-      for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
-        for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
-          const i = (cy * imgWidth + cx) * 4;
-          totalR += data[i];
-          totalG += data[i + 1];
-          totalB += data[i + 2];
-          totalL += rgbToLabL(data[i], data[i + 1], data[i + 2]);
-          pixelCount++;
+  const webglAvailable = useWebGL();
+
+  if (webglAvailable) {
+    const result = computeWithWebGL(imageData, imgWidth, imgHeight, {
+      wbR: 1, wbG: 1, wbB: 1, tempCorrR: 1, tempCorrG: 1, tempCorrB: 1
+    }, 1, asciiWidth, cellWidth, cellHeight, height);
+
+    if (result) {
+      cellR.set(result.cellR!);
+      cellG.set(result.cellG!);
+      cellB.set(result.cellB!);
+      cellBrightness.set(result.cellBrightness);
+    } else {
+      // WebGL failed - fall back to CPU
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < asciiWidth; x++) {
+          const idx = y * asciiWidth + x;
+          let totalR = 0, totalG = 0, totalB = 0, totalL = 0, pixelCount = 0;
+          for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
+            for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
+              const i = (cy * imgWidth + cx) * 4;
+              totalR += data[i];
+              totalG += data[i + 1];
+              totalB += data[i + 2];
+              totalL += rgbToLabL(data[i], data[i + 1], data[i + 2]);
+              pixelCount++;
+            }
+          }
+          cellR[idx] = totalR / pixelCount;
+          cellG[idx] = totalG / pixelCount;
+          cellB[idx] = totalB / pixelCount;
+          cellBrightness[idx] = totalL / pixelCount;
         }
       }
-      cellR[idx] = totalR / pixelCount;
-      cellG[idx] = totalG / pixelCount;
-      cellB[idx] = totalB / pixelCount;
-      cellBrightness[idx] = totalL / pixelCount;
+    }
+  } else {
+    // CPU path (fallback for Safari < 16.4)
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < asciiWidth; x++) {
+        const idx = y * asciiWidth + x;
+        let totalR = 0, totalG = 0, totalB = 0, totalL = 0, pixelCount = 0;
+        for (let cy = y * cellHeight; cy < y * cellHeight + cellHeight; cy++) {
+          for (let cx = x * cellWidth; cx < x * cellWidth + cellWidth; cx++) {
+            const i = (cy * imgWidth + cx) * 4;
+            totalR += data[i];
+            totalG += data[i + 1];
+            totalB += data[i + 2];
+            totalL += rgbToLabL(data[i], data[i + 1], data[i + 2]);
+            pixelCount++;
+          }
+        }
+        cellR[idx] = totalR / pixelCount;
+        cellG[idx] = totalG / pixelCount;
+        cellB[idx] = totalB / pixelCount;
+        cellBrightness[idx] = totalL / pixelCount;
+      }
     }
   }
 
@@ -575,29 +692,20 @@ const processColor = (
       const sG = Math.max(0, Math.min(255, cellG[idx] + colorK * (cellG[idx] - blurGSum / blurCount)));
       const sB = Math.max(0, Math.min(255, cellB[idx] + colorK * (cellB[idx] - blurBSum / blurCount)));
 
-      let cr = sR / 255, cg = sG / 255, cb = sB / 255;
-      cr = Math.pow(cr, 0.55); cg = Math.pow(cg, 0.55); cb = Math.pow(cb, 0.55);
-      const cmax = Math.max(cr, cg, cb), cmin = Math.min(cr, cg, cb);
-      const l = (cmax + cmin) / 2;
-      const d = cmax - cmin;
-      if (d > 0) {
-        const s = Math.min(1, (d / (1 - Math.abs(2 * l - 1))) * 1.5);
-        const chroma = s * (1 - Math.abs(2 * l - 1));
-        let h = 0;
-        if (cmax === cr) h = ((cg - cb) / d + 6) % 6;
-        else if (cmax === cg) h = (cb - cr) / d + 2;
-        else h = (cr - cg) / d + 4;
-        const x = chroma * (1 - Math.abs(h % 2 - 1));
-        const m = l - chroma / 2;
-        const hi = Math.floor(h);
-        const [r1, g1, b1] = hi === 0 ? [chroma, x, 0] : hi === 1 ? [x, chroma, 0] :
-          hi === 2 ? [0, chroma, x] : hi === 3 ? [0, x, chroma] :
-          hi === 4 ? [x, 0, chroma] : [chroma, 0, x];
-        cr = Math.min(1, r1 + m); cg = Math.min(1, g1 + m); cb = Math.min(1, b1 + m);
-      }
-      const r = Math.round(cr * 255).toString(16).padStart(2, '0');
-      const g = Math.round(cg * 255).toString(16).padStart(2, '0');
-      const b = Math.round(cb * 255).toString(16).padStart(2, '0');
+      let cr = GAMMA_TABLE[Math.round(sR)];
+      let cg = GAMMA_TABLE[Math.round(sG)];
+      let cb = GAMMA_TABLE[Math.round(sB)];
+
+      // Simple luminance-preserving chroma boost (replaces expensive HSL round-trip)
+      const mid = (cr + cg + cb) / 3;
+      const boost = 1.5;
+      cr = Math.min(1, Math.max(0, mid + (cr - mid) * boost));
+      cg = Math.min(1, Math.max(0, mid + (cg - mid) * boost));
+      cb = Math.min(1, Math.max(0, mid + (cb - mid) * boost));
+
+      const r = HEX_TABLE[Math.round(cr * 255)];
+      const g = HEX_TABLE[Math.round(cg * 255)];
+      const b = HEX_TABLE[Math.round(cb * 255)];
       parts.push(`<span style="color:#${r}${g}${b}">${char}</span>`);
     }
     parts.push('\n');
@@ -605,6 +713,13 @@ const processColor = (
 
   return parts.join('');
 };
+
+const HEX_TABLE: string[] = new Array(256);
+const GAMMA_TABLE = new Float32Array(256);
+for (let i = 0; i < 256; i++) {
+  HEX_TABLE[i] = i.toString(16).padStart(2, '0');
+  GAMMA_TABLE[i] = Math.pow(i / 255, 0.55);
+}
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 

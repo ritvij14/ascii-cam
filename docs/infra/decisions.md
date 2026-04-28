@@ -442,3 +442,112 @@ In practice, histogram equalization over-brightened most webcam scenes — the a
 A post-processing need arises that contrast/intensity cannot satisfy (e.g., true tone-mapping for HDR sources, or a dithering effect).
 
 ---
+
+### ADR-013: Extend WebGL shader to color mode (shared GPU pipeline)
+
+**Date:** 2026-04-27
+**Status:** Active
+
+**Decision:**
+The existing WebGL2 shader pipeline (ADR-008) is extended to serve both monochrome and color modes. A `uMode` uniform switches the fragment shader between two output encodings: monochrome emits `vec4(lum, lum, lum, 1.0)`; color mode emits `vec4(r, g, b, lum/100)` so the CPU can read back raw RGB and pre-computed LAB L* in a single `readPixels()` call.
+
+**Context:**
+Color mode was "EXTREMELY slow" compared to monochrome. Profiling showed the dominant cost was `rgbToLabL()` inside the per-cell pixel-averaging loop in `processColor()` — ~900,000 executions of `Math.pow` + `Math.cbrt` per 720p frame. Monochrome avoided this by offloading luminance to the GPU shader (ADR-008). Color mode ran 100% on CPU and ignored the existing GPU infrastructure.
+
+**Options considered:**
+- **Option A (chosen) — Extend the monochrome shader for color mode:** Add `uMode` uniform and `rgbToLabL()` in GLSL. Reuse the same `OffscreenCanvas`, framebuffer, texture, and VAO. Monochrome calls `computeWithWebGL(..., 0)`; color calls `computeWithWebGL(..., 1)`. Minimal shader change (~15 lines), zero new GPU resources.
+- **Option B — Compute color on CPU with cheaper math:** Replace `rgbToLabL` with `(R+G+B)/3` or `0.299R+0.587G+0.114B`. Simple but sacrifices perceptual accuracy for character selection.
+- **Option C — Downsample via WebGL `LINEAR` min-filter:** Render to the ASCII grid dimensions (e.g., 160×45) so each output pixel is a pre-averaged cell. Would eliminate the CPU averaging loop entirely, but requires dynamic framebuffer resizing per frame and changes the texture-coordinate math.
+- **Option D — Separate WebGPU compute shader for color:** Maximum parallelism and cleanest separation, but Safari and Firefox lack support.
+
+**Reasoning:**
+Option A is the smallest change with the largest impact. The shader already exists, compiles, and handles texture upload/readback. Adding `uMode` and the Lab conversion to the fragment shader is ~15 lines of GLSL. The CPU side reuses the same `computeBrightnessWithWebGL` function renamed to `computeWithWebGL`, returning `{ rgba, brightness }` instead of just brightness. Color mode reads RGB from the RGB channels and Lab L* from the alpha channel. No new WebGL resources are created, so there's no additional memory overhead or context-limit risk.
+
+Option B would make color mode faster but at the cost of quality — the LAB L* metric was chosen specifically because it better matches human brightness perception than simple luminance. Option C is a larger refactor and introduces questions about sub-pixel sampling quality when the grid doesn't divide evenly into source dimensions. Option D is premature — WebGL2 already provides sufficient speedup and has universal browser support.
+
+**Tradeoffs accepted:**
+- `gl.readPixels()` bandwidth doubles in color mode: monochrome reads back grayscale (1 byte effective per pixel), color reads back full RGBA (4 bytes). At 720p this is ~2.8MB vs ~3.7MB per frame — still well within integrated GPU limits at 30fps.
+- The alpha channel stores `lum/100`, so Lab L* precision is limited to 8 bits (0–255 mapped to 0–100). This is more than sufficient for character selection, which ultimately quantizes into `charset.length` buckets (≤70).
+- The shader does not apply white balance or color temperature in color mode (identity values passed). Color mode intentionally preserves raw source colors; monochrome applies WB/CT because it has only one output color.
+- CPU fallback path still exists for Safari < 16.4. The fallback is unchanged — it runs the original slow path, but those users are a shrinking minority.
+
+**Revisit when:**
+`gl.readPixels()` becomes the dominant bottleneck (indicated by `asciiTimeMs` exceeding ~25ms consistently on target hardware despite fast worker turnaround). At that point, Option C (GPU downsample to grid dimensions) would reduce readback bandwidth by ~100×.
+
+---
+
+### ADR-014: GPU cell averaging — render directly to ASCII grid dimensions
+
+**Date:** 2026-04-28
+**Status:** Active
+
+**Decision:**
+The WebGL2 shader pipeline (ADR-013) is extended so the fragment shader performs per-cell averaging internally and renders directly to the ASCII grid dimensions (`asciiWidth × height`), not the full source frame. This reduces `gl.readPixels()` from the full source resolution to the cell-grid resolution — a ~130× bandwidth reduction at typical settings. The CPU no longer walks source pixels at all; it only receives pre-averaged cell values.
+
+**Context:**
+After ADR-013 offloaded `rgbToLabL()` to the GPU, color mode was still reported as "very slow." Profiling the remaining CPU work showed two dominant costs:
+1. `gl.readPixels()` on the full 720p frame (~3.7 MB synchronous GPU→CPU copy per frame)
+2. The CPU cell-averaging loop in `processColor()` (~1M source pixel visits: 7,200 cells × ~128 pixels each)
+
+These two costs are coupled: the CPU has to read the full frame because it needs per-pixel data to compute per-cell averages.
+
+**Options considered:**
+- **Option A (chosen) — Shader cell averaging + grid-sized framebuffer:** Change the shader so each output fragment corresponds to one ASCII cell. Inside the fragment shader, loop over the source pixels belonging to that cell, accumulate RGB and Lab L*, and output the average. The CPU `readPixels()` call reads only `asciiWidth × height` pixels. This eliminates both `readPixels` bandwidth and the CPU averaging loop in one change.
+- **Option B — `gl.generateMipmap()` + mipmap sampling:** Use OpenGL's built-in bilinear downsample chain. Fastest GPU path, but bilinear interpolation is not a box average. Edge cells and high-contrast regions would get slightly different values than the CPU box filter, producing visible artifacts in ASCII output.
+- **Option C — Two-pass separable GPU filter:** First pass averages horizontally, second pass averages vertically. Exact box filter on GPU, but requires two draw calls, two framebuffers, and more state management. Overkill when Option A achieves the same result in a single pass.
+- **Option D — CPU SIMD optimization:** Use `Float32Array` bulk operations or WebAssembly to speed up the averaging loop. Would not address the `readPixels` bandwidth bottleneck and adds a new toolchain dependency.
+
+**Reasoning:**
+Option A is the minimal correct change. The shader already has access to the source texture and already computes per-pixel Lab L*. Adding nested `for` loops in GLSL ES 3.0 (with `break` on uniform bounds) is ~20 lines. The GPU executes all cells in parallel, and the per-cell loop bounds are small (`cellWidth ≤ fontSize ≤ 20`, `cellHeight ≤ 40`). Modern GPUs handle this easily.
+
+The `gl_FragCoord` → cell mapping requires Y-flip (`cellY = gridHeight - 1 - gl_FragCoord.y`) because `gl_FragCoord.y = 0` is the viewport bottom, but ASCII row 0 is the top of the image. Sample coordinates are centered on pixels (`+ 0.5`) and divided by source dimensions, matching the existing flipped-texture-coordinate convention.
+
+Edge cells where `sx_start + cellWidth > sourceWidth` are clamped with `maxDx = min(cellWidth, sourceWidth - sx_start)`, preserving exact parity with the CPU fallback path.
+
+**Tradeoffs accepted:**
+- The fragment shader now contains small nested loops (max 128×128 iterations, typically 8×16). Some mobile GPU compilers may struggle with dynamic loop bounds, but WebGL2 GLSL ES 3.0 requires uniform-dependent `break` to work. In practice, the loop is tiny and fully unrollable.
+- Monochrome mode also benefits from this change — its CPU cell-averaging loop is eliminated too, though it was already fast enough that this is a secondary win.
+- CPU fallback path is unchanged and still works for Safari < 16.4.
+
+**Revisit when:**
+The next bottleneck after this change is likely string allocation in the HTML span generation (~29,000 string allocs per frame). At that point, a string-pool or `Array.join()` optimization would be the next step.
+
+---
+
+### ADR-015: Replace HSL saturation boost with luminance-preserving RGB chroma boost
+
+**Date:** 2026-04-28
+**Status:** Active
+
+**Decision:**
+The full HSL→RGB round-trip in `processColor()` (hue calculation, sector lookup, chroma reconstruction) is replaced with a simple luminance-preserving RGB chroma boost. Each channel is moved away from the gray midpoint by 1.5×, then clamped to [0, 1].
+
+**Context:**
+After ADR-014 (GPU cell averaging), hex table optimization, and gamma table optimization, color mode was still reported as "still slow" at high detail. Profiling the remaining CPU hot loop showed the HSL saturation boost as the dominant cost:
+
+- `cmax`, `cmin`, `l`, `d` — 4 comparisons + 2 additions
+- `s = Math.min(1, (d / (1 - Math.abs(2 * l - 1))) * 1.5)` — 1 abs, 1 div, 1 mult, 1 min
+- `chroma = s * (1 - Math.abs(2 * l - 1))` — 1 abs, 1 mult, 1 sub
+- Hue calculation + sector ternary (6 branches) — 3 conditionals, modulo, floor
+- HSL→RGB reconstruction — 3 multiplications, 3 additions, 3 mins
+
+Total: ~15+ transcendental/arithmetic operations per cell. At high detail (~7,200 cells), this is ~108,000 operations per frame — all in the single-threaded CPU hot loop.
+
+**Options considered:**
+- **Option A (chosen) — RGB midpoint chroma boost:** `mid = (cr + cg + cb) / 3`, then `cr = clamp(mid + (cr - mid) * 1.5, 0, 1)`. Mathematically equivalent to scaling saturation while holding luminance constant, because moving each channel away from the midpoint by a constant factor increases the distance from gray without changing the average.
+- **Option B — Skip saturation boost entirely:** Fastest, but colors remain muted/gray as they come from the webcam.
+- **Option C — Precompute HSL→RGB lookup table:** A 256×256×256 table is 16MB — impractical. A reduced-resolution table would introduce quantization artifacts.
+- **Option D — Move saturation boost to GPU shader:** The shader already computes RGB averages; it could apply the boost before `readPixels()`. However, the shader output is `RGBA8` (8 bits per channel), and the boost requires floating-point precision to avoid banding. Adding a float framebuffer would double GPU memory and complicate the pipeline.
+
+**Reasoning:**
+Option A is mathematically sound and visually indistinguishable from the HSL approach for the typical webcam color ranges involved. The midpoint method preserves luminance exactly (the average of `mid + (c - mid) * k` across channels equals `mid`), and the 1.5× factor matches the previous saturation multiplier. The visual difference is negligible because the HSL method itself was already clamping at `s = 1.0` for most cells, and the midpoint method achieves a similar perceptual effect with far fewer operations.
+
+Option B was rejected because the muted webcam colors genuinely need a lift — without it, the color mode looks flat. Option C is infeasible due to memory. Option D is overkill when a CPU-side simplification achieves the same result.
+
+**Tradeoffs accepted:**
+- The midpoint method is not *exactly* identical to HSL saturation scaling for extreme colors (near-primary hues at very high saturation). In practice, webcam source colors are never at those extremes, and the visual difference is imperceptible.
+- The clamping behavior differs slightly: HSL clamps saturation to 1.0 then reconstructs; the midpoint method clamps each RGB channel independently. Both approaches prevent out-of-gamut colors.
+- CPU fallback path uses the same simplified code, so Safari < 16.4 also benefits.
+
+**Revisit when:**
+If future user feedback indicates colors look oversaturated or hue-shifted compared to prior versions, the exact HSL method can be restored behind a `highQuality` flag or re-implemented as a reduced lookup table.
